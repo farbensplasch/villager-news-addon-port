@@ -18,6 +18,7 @@ public final class VillagerNewsSettings {
 	private static int chattiness = 2;
 	private static int rareVoicelines = 1;
 	private static boolean spawnSpecialVillagers = true;
+	private static boolean showSubtitles = true;
 
 	private VillagerNewsSettings() {
 	}
@@ -32,11 +33,13 @@ public final class VillagerNewsSettings {
 			chattiness = clamp(root.has("chattiness") ? root.get("chattiness").getAsInt() : 2, 0, 3);
 			rareVoicelines = clamp(root.has("rareVoicelines") ? root.get("rareVoicelines").getAsInt() : 1, 0, 2);
 			spawnSpecialVillagers = !root.has("spawnSpecialVillagers") || root.get("spawnSpecialVillagers").getAsBoolean();
+			showSubtitles = !root.has("showSubtitles") || root.get("showSubtitles").getAsBoolean();
 		} catch (IOException | RuntimeException exception) {
 			VillagerNewsAddonPort.LOGGER.warn("Could not load Villager News settings; using defaults", exception);
 			chattiness = 2;
 			rareVoicelines = 1;
 			spawnSpecialVillagers = true;
+			showSubtitles = true;
 			save();
 		}
 	}
@@ -60,6 +63,21 @@ public final class VillagerNewsSettings {
 		return spawnSpecialVillagers;
 	}
 
+	/**
+	 * Whether this mod draws its own timed dialogue subtitles. This is deliberately a mod setting
+	 * rather than vanilla's {@code Options#showSubtitles} accessibility option: the dialogue
+	 * subtitles are transcripts of the Villager News voice lines, and players want to turn those on
+	 * or off without also flipping every vanilla sound subtitle.
+	 */
+	public static boolean showSubtitles() {
+		return showSubtitles;
+	}
+
+	public static synchronized void setShowSubtitles(boolean enabled) {
+		showSubtitles = enabled;
+		save();
+	}
+
 	public static boolean dialogueEnabled() {
 		return chattiness > 0;
 	}
@@ -77,6 +95,7 @@ public final class VillagerNewsSettings {
 		root.addProperty("chattiness", chattiness);
 		root.addProperty("rareVoicelines", rareVoicelines);
 		root.addProperty("spawnSpecialVillagers", spawnSpecialVillagers);
+		root.addProperty("showSubtitles", showSubtitles);
 		try {
 			Files.createDirectories(PATH.getParent());
 			Files.writeString(PATH, GSON.toJson(root) + System.lineSeparator(), StandardCharsets.UTF_8);
