@@ -4,8 +4,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.vnap.network.DialogueAnimationPayload;
-import com.vnap.entity.VillagerNewsData;
 import net.minecraft.client.Minecraft;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
@@ -123,15 +121,15 @@ public final class DialogueAnimationState {
 		TURN_STATES.clear();
 	}
 
-	static void start(DialogueAnimationPayload payload) {
-		if (payload.groupId().isEmpty()) {
-			ActiveDialogue previous = ACTIVE.get(payload.entityId());
+	static void start(UUID entityId, String groupId, int variantIndex, int durationTicks) {
+		if (groupId.isEmpty()) {
+			ActiveDialogue previous = ACTIVE.get(entityId);
 			if (previous == null || previous.poseSnapshot().isEmpty()) {
-				ACTIVE.remove(payload.entityId());
+				ACTIVE.remove(entityId);
 				return;
 			}
 			long now = System.nanoTime();
-			ACTIVE.put(payload.entityId(), new ActiveDialogue(
+			ACTIVE.put(entityId, new ActiveDialogue(
 				now,
 				now,
 				now + (long) (BLEND_SECONDS * 1_000_000_000L),
@@ -141,15 +139,15 @@ public final class DialogueAnimationState {
 			));
 			return;
 		}
-		List<VariantTimeline> variants = TIMELINES.get(payload.groupId());
-		if (variants == null || payload.variantIndex() < 0 || payload.variantIndex() >= variants.size()) return;
+		List<VariantTimeline> variants = TIMELINES.get(groupId);
+		if (variants == null || variantIndex < 0 || variantIndex >= variants.size()) return;
 		long now = System.nanoTime();
-		VariantTimeline timeline = variants.get(payload.variantIndex());
-		float audioSeconds = Math.max(1, payload.durationTicks()) / 20.0F;
+		VariantTimeline timeline = variants.get(variantIndex);
+		float audioSeconds = Math.max(1, durationTicks) / 20.0F;
 		float totalSeconds = Math.max(audioSeconds + MOUTH_BLEND_SECONDS, timeline.poseEndSeconds());
-		ActiveDialogue previous = ACTIVE.get(payload.entityId());
+		ActiveDialogue previous = ACTIVE.get(entityId);
 		Map<String, Float> previousPose = previous == null ? Map.of() : previous.poseSnapshot();
-		ACTIVE.put(payload.entityId(), new ActiveDialogue(
+		ACTIVE.put(entityId, new ActiveDialogue(
 			now,
 			now + (long) (audioSeconds * 1_000_000_000L),
 			now + (long) (totalSeconds * 1_000_000_000L),
@@ -183,12 +181,13 @@ public final class DialogueAnimationState {
 		EMFEntity entity = EMFAnimationApi.getCurrentEntity();
 		boolean rainbow = entity instanceof Villager villager && "jeb_".equals(villager.getName().getString());
 		RainbowNoseRenderState.update(rainbow, entity == null ? 0.0F : animationTick(entity), entity == null ? null : entity.etf$getUuid());
-		return entity instanceof Villager villager && ((VillagerNewsData) villager).vnap$hasNose() ? 1.0F : 0.0F;
+		return entity instanceof Villager villager && VillagerCosmetics.hasNose(villager.getUUID()) ? 1.0F : 0.0F;
 	}
 
 	static float cosmetic(int cosmetic) {
 		EMFEntity entity = EMFAnimationApi.getCurrentEntity();
-		return entity instanceof Villager villager && ((VillagerNewsData) villager).vnap$cosmetic() == cosmetic ? 1.0F : 0.0F;
+		return entity instanceof Villager villager
+			&& VillagerCosmetics.cosmeticFor(ClientDialogueController.cast(villager)) == cosmetic ? 1.0F : 0.0F;
 	}
 
 	static float transform(String variableName) {

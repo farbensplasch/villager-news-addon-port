@@ -1,22 +1,23 @@
 package com.vnap;
 
-import com.vnap.command.DialogueTestCommand;
-import com.vnap.config.VillagerNewsBuildSettings;
 import com.vnap.config.VillagerNewsSettings;
-import com.vnap.dialogue.ContextualDialogueController;
 import com.vnap.dialogue.DialogueCatalog;
 import com.vnap.item.VillagerNewsItems;
-import com.vnap.network.DialogueAnimationPayload;
-import com.vnap.network.VillagerNewsSettingsNetwork;
-import com.vnap.network.VillagerNewsSettingsPayload;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 
 import net.minecraft.resources.Identifier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Common entrypoint. As of the client-only rewrite this mod is declared {@code "environment":
+ * "client"} in fabric.mod.json, so this only ever runs inside the same physical client process as
+ * {@link com.vnap.client.VillagerNewsAddonPortClient} (including for the integrated server in
+ * singleplayer/LAN) - it is kept separate mainly to mirror the registry-construction ordering
+ * Fabric expects (items/sounds/dialogue catalog before client rendering/animation wiring reads
+ * them), not because it needs to run on a dedicated server.
+ */
 public class VillagerNewsAddonPort implements ModInitializer {
 	public static final String MOD_ID = "villager-news-addon-port";
 
@@ -25,14 +26,8 @@ public class VillagerNewsAddonPort implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		VillagerNewsItems.register();
-		PayloadTypeRegistry.clientboundPlay().register(DialogueAnimationPayload.TYPE, DialogueAnimationPayload.CODEC);
-		PayloadTypeRegistry.clientboundPlay().register(VillagerNewsSettingsPayload.TYPE, VillagerNewsSettingsPayload.CODEC);
-		PayloadTypeRegistry.serverboundPlay().register(VillagerNewsSettingsPayload.TYPE, VillagerNewsSettingsPayload.CODEC);
 		VillagerNewsSettings.load();
-		VillagerNewsSettingsNetwork.register();
 		DialogueCatalog.register();
-		ContextualDialogueController.register();
-		if (VillagerNewsBuildSettings.dialogueTestCommand()) DialogueTestCommand.register();
 		LOGGER.info("Villager News models, textures, and contextual dialogue are ready.");
 	}
 

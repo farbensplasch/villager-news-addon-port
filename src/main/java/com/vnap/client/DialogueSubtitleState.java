@@ -2,7 +2,6 @@ package com.vnap.client;
 
 import com.vnap.VillagerNewsAddonPort;
 import com.vnap.dialogue.DialogueCatalog;
-import com.vnap.network.DialogueAnimationPayload;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.minecraft.ChatFormatting;
@@ -39,19 +38,19 @@ public final class DialogueSubtitleState {
 		);
 	}
 
-	public static void start(DialogueAnimationPayload payload) {
-		if (payload.groupId().isEmpty() || payload.durationTicks() <= 0) {
-			ACTIVE.remove(payload.entityId());
+	public static void start(java.util.UUID entityId, String groupId, int variantIndex, int durationTicks) {
+		if (groupId.isEmpty() || durationTicks <= 0) {
+			ACTIVE.remove(entityId);
 			return;
 		}
-		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(payload.groupId());
+		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(groupId);
 		if (group == null) return;
 		DialogueCatalog.DialogueVariant variant = group.variants().stream()
-			.filter(candidate -> candidate.index() == payload.variantIndex()).findFirst().orElse(null);
+			.filter(candidate -> candidate.index() == variantIndex).findFirst().orElse(null);
 		if (variant == null || variant.subtitles().isEmpty()) return;
 		long startNanos = System.nanoTime();
-		ACTIVE.put(payload.entityId(), new ActiveSubtitle(
-			startNanos, startNanos + payload.durationTicks() * 50_000_000L, variant.subtitles()
+		ACTIVE.put(entityId, new ActiveSubtitle(
+			startNanos, startNanos + durationTicks * 50_000_000L, variant.subtitles()
 		));
 	}
 

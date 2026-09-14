@@ -1,65 +1,49 @@
-package com.vnap.dialogue;
+package com.vnap.client;
 
 import com.vnap.config.VillagerNewsSettings;
-import com.vnap.entity.VillagerNewsData;
-import com.vnap.item.VillagerNewsItems;
-import com.vnap.network.DialogueAnimationNetwork;
+import com.vnap.dialogue.DialogueCatalog;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.entity.event.v1.EntitySleepEvents;
-import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.network.chat.Component;
-import net.minecraft.sounds.SoundSource;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.util.Mth;
+import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
-import net.minecraft.world.Difficulty;
+import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntitySpawnReason;
-import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
-import net.minecraft.world.entity.ai.util.DefaultRandomPos;
 import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.npc.villager.Villager;
-import net.minecraft.world.entity.npc.villager.VillagerProfession;
 import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
-import net.minecraft.world.item.trading.ItemCost;
-import net.minecraft.world.item.trading.MerchantOffer;
 import net.minecraft.world.inventory.MerchantMenu;
-import net.minecraft.world.level.Level;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.trading.MerchantOffer;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.scores.Objective;
-import net.minecraft.world.scores.ScoreHolder;
-import net.minecraft.world.scores.Scoreboard;
-import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -71,12 +55,28 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 
-public final class ContextualDialogueController {
-	public static final String DIALOGUE_TEST_TAG = "vnap_dialogue_test";
+/**
+ * Client-tick-driven rewrite of the old server-side {@code ContextualDialogueController}. This is
+ * the piece that makes the mod work standing entirely on the player's own client, against a
+ * vanilla/unmodded dedicated server, in singleplayer, and in LAN games alike - it drives itself
+ * off client-visible world/entity state and Fabric API's client-firing events instead of
+ * server-only ones, and triggers dialogue playback with direct, in-process calls into
+ * {@link DialogueSoundState}, {@link DialogueAnimationState} and {@link DialogueSubtitleState}
+ * instead of building a network packet.
+ *
+ * <p>A few pieces of the original design cannot be preserved on a client-only install and are
+ * either dropped or approximated - see the per-feature notes below and the module's plan
+ * document. In short: natural/scoreboard-tracked special-villager spawning, the {@code
+ * /dialoguetest} debug command, the villager sleep-delay mixin, and the "Unreachable" villager's
+ * active flee/teleport AI (which requires server authority over the entity's movement) are gone;
+ * reputation-gated dialogue and the raid "busy" line use local, client-observable proxies instead
+ * of the real (unsynced) server data.</p>
+ */
+public final class ClientDialogueController {
 	private static final double OBSERVER_RANGE = 16.0;
 	private static final double NEARBY_SUBJECT_RANGE = 8.0;
 	private static final long SHORT_COOLDOWN = 20L * 45L;
@@ -84,8 +84,6 @@ public final class ContextualDialogueController {
 	private static final Map<String, Long> COOLDOWNS = new HashMap<>();
 	private static final Map<UUID, Long> BUSY_UNTIL = new HashMap<>();
 	private static final Map<UUID, ActiveSound> ACTIVE_SOUNDS = new HashMap<>();
-	private static final Map<UUID, PlayerObservation> PLAYER_OBSERVATIONS = new HashMap<>();
-	private static final Map<UUID, Integer> PLAYER_DEATHS = new HashMap<>();
 	private static final Map<UUID, Boolean> LAST_SLEEPING = new HashMap<>();
 	private static final Map<UUID, Boolean> LAST_TRADER_INVISIBLE = new HashMap<>();
 	private static final Map<UUID, VillagerSnapshot> VILLAGER_STATES = new HashMap<>();
@@ -95,32 +93,18 @@ public final class ContextualDialogueController {
 	private static final Map<UUID, Long> NO_WORKSTATION_SINCE = new HashMap<>();
 	private static final Map<UUID, Long> LAST_DANGER = new HashMap<>();
 	private static final Map<UUID, Long> NO_BELL_SINCE = new HashMap<>();
-	private static final Map<UUID, TradeSession> ACTIVE_TRADES = new HashMap<>();
-	private static final Map<UUID, UnreachableState> UNREACHABLE_STATES = new HashMap<>();
-	private static final Set<UUID> ACTIVE_PLAYER_ENCOUNTERS = new HashSet<>();
-	private static final Map<UUID, PendingSleep> PENDING_SLEEP = new HashMap<>();
-	private static final Set<UUID> SLEEP_BYPASS = new HashSet<>();
-	private static final Set<UUID> INTERRUPTED_SLEEP = new HashSet<>();
+	private static final Map<UUID, Float> HEALTH_SNAPSHOT = new HashMap<>();
+	private static final Map<UUID, Integer> LOCAL_REPUTATION = new HashMap<>();
+	// Stores the synced game-time each pair was first observed standing together, rather than a
+	// per-client incrementing counter - so "have they been together long enough" is measured from
+	// an absolute shared clock and lines up across independently-ticking clients.
+	private static final Map<String, Long> PAIR_TICKS = new HashMap<>();
+	private static final Set<UUID> ACTIVE_PLAYER_ENCOUNTER = new HashSet<>();
 	private static final List<PendingSpeech> PENDING_SPEECH = new ArrayList<>();
-	private static final Map<String, Long> LAST_LEVEL_TIME = new HashMap<>();
-	private static final Map<String, Difficulty> LAST_DIFFICULTY = new HashMap<>();
-	private static final Map<String, Integer> PAIR_TICKS = new HashMap<>();
-	private static final String NATURAL_SPECIAL_TAG = "vnap_natural_special";
-	private static final String SPECIAL_OBJECTIVE = "vnap_special";
-	private static final String SPECIAL_X_OBJECTIVE = "vnap_special_x";
-	private static final String SPECIAL_Z_OBJECTIVE = "vnap_special_z";
-	private static final Map<String, String> NATURAL_SPECIAL_NAMES = Map.of(
-		"mayor", "The Mayor",
-		"testificate", "Testificate Man",
-		"number_5", "Villager #5",
-		"number_9", "Villager #9",
-		"unreachable", "Can't Catch Me!",
-		"wooly", "Wooly The Sheep"
-	);
-	private static final Set<String> SPECIAL_NAMES = Set.of(
-		"Mayor Villager", "The Mayor", "Testificate Man", "Villager #5", "Villager #9",
-		"Villager Unreachable", "Can't Catch Me!", "Wooly The Sheep"
-	);
+	// Keyed per-player rather than a single shared instance: processPlayer() now runs once per
+	// observable player each tick, and each player needs their own independent movement/stare/ground
+	// tracking state rather than one player's movement clobbering another's.
+	private static final Map<UUID, PlayerObservation> OBSERVATIONS = new HashMap<>();
 	private static final Set<String> MOBILE_DIALOGUES = Set.of(
 		"huhcbd", "gesjov", "gacgtq", "hmadgp", "nkcoqb", "qhpyaw", "uveohs", "caykki",
 		"swomdw", "rtikom", "hfmwvf", "mytmrk", "ikrwzy", "fcbygh", "etkxko", "elryje",
@@ -140,6 +124,9 @@ public final class ContextualDialogueController {
 	);
 	private static final Set<String> DAMAGE_LOCK_DIALOGUES = Set.of(
 		"elryje", "onindz", "rogpvp", "etkxko", "igebly", "vnaodx"
+	);
+	private static final Set<String> RAIDER_TYPES = Set.of(
+		"pillager", "vindicator", "evoker", "vex", "ravager", "witch", "illusioner"
 	);
 	private static final List<List<String>> WANDERING_CONVERSATIONS = List.of(
 		List.of("gmrypkswxeva", "gmrypkbayahw", "gmrypkmudlec"),
@@ -193,363 +180,181 @@ public final class ContextualDialogueController {
 		Map.entry("zombified_piglin", "qltnkz"), Map.entry("zombie_villager", "nstwos")
 	);
 	private static long ticks;
+	private static long lastLevelTime = Long.MIN_VALUE;
+	private static Difficulty lastDifficulty;
+	private static TradeSession activeTrade;
 
-	private ContextualDialogueController() {
+	private ClientDialogueController() {
 	}
 
 	public static void register() {
-		ServerTickEvents.END_SERVER_TICK.register(ContextualDialogueController::tick);
-		ServerEntityEvents.ENTITY_LOAD.register(ContextualDialogueController::onEntityLoad);
-		ServerEntityEvents.ENTITY_UNLOAD.register((entity, level) -> {
-			UUID id = entity.getUUID();
-			String encodedId = id.toString();
-			BUSY_UNTIL.remove(id);
-			ACTIVE_SOUNDS.remove(id);
-			SPEECH_TARGETS.remove(id);
-			LAST_SLEEPING.remove(id);
-			LAST_TRADER_INVISIBLE.remove(id);
-			VILLAGER_STATES.remove(id);
-			VILLAGER_INVENTORIES.remove(id);
-			NO_WORKSTATION_SINCE.remove(id);
-			LAST_DANGER.remove(id);
-			NO_BELL_SINCE.remove(id);
-			PLAYER_OBSERVATIONS.remove(id);
-			PLAYER_DEATHS.remove(id);
-			ACTIVE_TRADES.remove(id);
-			ACTIVE_PLAYER_ENCOUNTERS.remove(id);
-			ACTIVE_TRADES.entrySet().removeIf(entry -> entry.getValue().traderId.equals(id));
-			UNREACHABLE_STATES.remove(id);
-			PENDING_SLEEP.remove(id);
-			SLEEP_BYPASS.remove(id);
-			INTERRUPTED_SLEEP.remove(id);
-			PENDING_SPEECH.removeIf(pending -> pending.speakerId.equals(id) || id.equals(pending.targetId));
-			PAIR_TICKS.keySet().removeIf(pair -> pair.contains(encodedId));
-		});
+		ClientTickEvents.END_CLIENT_TICK.register(ClientDialogueController::tick);
+		ClientEntityEvents.ENTITY_LOAD.register((entity, level) -> onEntityLoad(entity));
+		ClientEntityEvents.ENTITY_UNLOAD.register((entity, level) -> onEntityUnload(entity));
 
 		PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
-			if (level instanceof ServerLevel serverLevel) {
-				PlayerObservation observation = PLAYER_OBSERVATIONS.computeIfAbsent(player.getUUID(), ignored -> new PlayerObservation());
-				String title = selectBreakContext(state, observation);
-				if (title.equals("Harvest Crops") && nearbyVillagers(serverLevel, Vec3.atCenterOf(pos), OBSERVER_RANGE).stream()
-						.anyMatch(villager -> profession(villager).equals("farmer"))) title = "Harvest Crops Near a Farmer";
-				playObserved(serverLevel, player, Vec3.atCenterOf(pos), title, SHORT_COOLDOWN);
-			}
+			if (!level.isClientSide() || !isLocalPlayer(player)) return;
+			PlayerObservation observation = observationFor(player);
+			String title = selectBreakContext(state, observation);
+			if (title.equals("Harvest Crops") && nearbyVillagers(level, Vec3.atCenterOf(pos), OBSERVER_RANGE).stream()
+					.anyMatch(villager -> profession(villager).equals("farmer"))) title = "Harvest Crops Near a Farmer";
+			playObserved(level, player, Vec3.atCenterOf(pos), title, SHORT_COOLDOWN);
 		});
 
 		UseBlockCallback.EVENT.register((player, level, hand, hitResult) -> {
-			if (level instanceof ServerLevel serverLevel) {
-				ItemStack held = player.getItemInHand(hand);
-				BlockState clicked = level.getBlockState(hitResult.getBlockPos());
-				String clickedPath = BuiltInRegistries.BLOCK.getKey(clicked.getBlock()).getPath();
-				String title = selectHeldBlockContext(held, clicked);
-				if (title == null && held.getItem() instanceof BlockItem blockItem) {
-					title = selectPlaceContext(blockItem.getBlock(), serverLevel, hitResult.getBlockPos());
-				} else if (title == null) {
-					title = selectUseBlockContext(clicked);
-				}
-				if (clickedPath.endsWith("_door") && clicked.hasProperty(BlockStateProperties.OPEN)
-						&& clicked.getValue(BlockStateProperties.OPEN)
-						&& !nearbyVillagers(serverLevel, hitResult.getLocation(), 3.0).isEmpty()) title = "Close a Door in a Villager's Face";
-				String heldPath = BuiltInRegistries.ITEM.getKey(held.getItem()).getPath();
-				if ((heldPath.equals("pumpkin") || heldPath.equals("carved_pumpkin"))
-						&& nearBlock(serverLevel, hitResult.getBlockPos(), "iron_block", 3)) title = "Build an Iron Golem Frame";
-				boolean played = (clickedPath.equals("chest") || clickedPath.equals("trapped_chest"))
-					&& playHomeChestReaction(serverLevel, player, hitResult.getBlockPos());
-				if (!played) played = title != null && playObserved(serverLevel, player, hitResult.getLocation(), title, SHORT_COOLDOWN);
-				if (!played && BuiltInRegistries.BLOCK.getKey(clicked.getBlock()).getPath().equals("bell")) {
-					nearbyVillagers(serverLevel, hitResult.getLocation(), OBSERVER_RANGE).stream()
-						.filter(villager -> villager.isBaby() && !villager.isSleeping())
-						.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(hitResult.getLocation())))
-						.ifPresent(baby -> playId(baby, "nxalcz", "baby_bell:" + baby.getUUID(), SHORT_COOLDOWN, player));
-				}
-			}
+			if (level.isClientSide() && isLocalPlayer(player)) onUseBlock(level, player, hand, hitResult.getBlockPos(), hitResult.getLocation());
 			return InteractionResult.PASS;
 		});
 
 		UseItemCallback.EVENT.register((player, level, hand) -> {
-			if (level instanceof ServerLevel serverLevel) {
+			if (level.isClientSide() && isLocalPlayer(player)) {
 				String title = selectUseItemContext(player.getItemInHand(hand));
-				if (title != null) playObserved(serverLevel, player, player.position(), title, SHORT_COOLDOWN);
+				if (title != null) playObserved(level, player, player.position(), title, SHORT_COOLDOWN);
 			}
 			return InteractionResult.PASS;
 		});
 
 		UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
-			if (level instanceof ServerLevel) return onUseEntity(player, entity, hand);
+			if (level.isClientSide() && isLocalPlayer(player)) return onUseEntity(player, entity, hand);
 			return InteractionResult.PASS;
 		});
 
 		AttackEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
-			if (entity.entityTags().contains(DIALOGUE_TEST_TAG)) return InteractionResult.SUCCESS;
-			if (level instanceof ServerLevel && entity instanceof Villager villager
-					&& cast(villager) == CastProfile.UNREACHABLE) {
-				repelPlayer(villager, player);
-				return InteractionResult.SUCCESS;
-			}
-			if (level instanceof ServerLevel) onAttackEntity(player, entity);
+			if (level.isClientSide() && isLocalPlayer(player)) onAttackEntity(player, entity);
 			return InteractionResult.PASS;
 		});
 
 		EntitySleepEvents.STOP_SLEEPING.register((entity, sleepingPos) -> {
-			if (entity instanceof ServerPlayer player) {
-				boolean armored = List.of(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET)
-					.stream().anyMatch(slot -> !player.getItemBySlot(slot).isEmpty());
-				playObserved(player.level(), player, player.position(), armored ? "Wake Up in Armor" : "Player Wakes Up", LONG_COOLDOWN);
-			} else if (entity instanceof Villager villager) {
-				UUID id = villager.getUUID();
-				boolean interrupted = INTERRUPTED_SLEEP.remove(id);
-				PENDING_SLEEP.remove(villager.getUUID());
-				SLEEP_BYPASS.remove(villager.getUUID());
+			if (entity.level().isClientSide() && entity instanceof Villager villager) {
 				interrupt(villager);
-				if (interrupted || entity.level() instanceof ServerLevel level
-						&& Math.floorMod(level.getOverworldClockTime(), 24000L) >= 12000L) {
-					LAST_SLEEPING.put(id, false);
-				}
 			}
 		});
 
-		ServerLivingEntityEvents.AFTER_DAMAGE.register(ContextualDialogueController::onDamage);
-		ServerLivingEntityEvents.AFTER_DEATH.register(ContextualDialogueController::onDeath);
-		ServerLifecycleEvents.SERVER_STOPPING.register(server -> clearState());
+		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> clearState());
 	}
 
-	private static void onEntityLoad(Entity entity, ServerLevel level) {
-		if (entity.entityTags().contains(DIALOGUE_TEST_TAG)) return;
+	private static boolean isLocalPlayer(Player player) {
+		Minecraft minecraft = Minecraft.getInstance();
+		return minecraft.player != null && minecraft.player == player;
+	}
+
+	/**
+	 * All non-spectator players currently visible on this client, sorted by UUID. Two independently
+	 * running clients on the same server see the same world state but {@link ClientLevel#players()}
+	 * makes no ordering guarantee, so anything that needs a deterministic scan/iteration order across
+	 * clients (nearest-of-all-observers picks, tie-breaks, etc.) should iterate this instead of
+	 * {@code level.players()} directly.
+	 */
+	private static List<AbstractClientPlayer> observablePlayers(ClientLevel level) {
+		return level.players().stream()
+			.filter(candidate -> !candidate.isSpectator())
+			.sorted(Comparator.comparing(Player::getUUID))
+			.toList();
+	}
+
+	private static PlayerObservation observationFor(Player player) {
+		return OBSERVATIONS.computeIfAbsent(player.getUUID(), ignored -> new PlayerObservation());
+	}
+
+	private static void onUseBlock(Level level, Player player, InteractionHand hand, BlockPos pos, Vec3 hitLocation) {
+		ItemStack held = player.getItemInHand(hand);
+		BlockState clicked = level.getBlockState(pos);
+		String clickedPath = BuiltInRegistries.BLOCK.getKey(clicked.getBlock()).getPath();
+		String title = selectHeldBlockContext(held, clicked);
+		if (title == null && held.getItem() instanceof BlockItem blockItem) {
+			title = selectPlaceContext(blockItem.getBlock(), level, pos);
+		} else if (title == null) {
+			title = selectUseBlockContext(clicked);
+		}
+		if (clickedPath.endsWith("_door") && clicked.hasProperty(BlockStateProperties.OPEN)
+				&& clicked.getValue(BlockStateProperties.OPEN)
+				&& !nearbyVillagers(level, hitLocation, 3.0).isEmpty()) title = "Close a Door in a Villager's Face";
+		String heldPath = BuiltInRegistries.ITEM.getKey(held.getItem()).getPath();
+		if ((heldPath.equals("pumpkin") || heldPath.equals("carved_pumpkin"))
+				&& nearBlock(level, pos, "iron_block", 3)) title = "Build an Iron Golem Frame";
+		boolean played = (clickedPath.equals("chest") || clickedPath.equals("trapped_chest"))
+			&& playHomeChestReaction(level, player, pos);
+		if (!played) played = title != null && playObserved(level, player, hitLocation, title, SHORT_COOLDOWN);
+		if (!played && clickedPath.equals("bell")) {
+			nearbyVillagers(level, hitLocation, OBSERVER_RANGE).stream()
+				.filter(villager -> villager.isBaby() && !villager.isSleeping())
+				.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(hitLocation)))
+				.ifPresent(baby -> playId(baby, "nxalcz", "baby_bell:" + baby.getUUID(), SHORT_COOLDOWN, player));
+		}
+	}
+
+	private static void onEntityLoad(Entity entity) {
 		normalizeSpecialEntity(entity);
 		String entityPath = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath();
 		if (entityPath.equals("firework_rocket")) {
-			playFireworkReactions(level, entity);
+			playFireworkReactions(entity.level(), entity);
 			return;
 		}
 		if (entityPath.equals("lightning_bolt")) {
-			playLightningReaction(level, entity);
-			return;
-		}
-		if (entity instanceof Sheep sheep) {
-			if (isWooly(sheep) && sheep.getColor() == DyeColor.RED) sheep.setColor(DyeColor.WHITE);
+			playLightningReaction(entity.level(), entity);
 			return;
 		}
 		if (!(entity instanceof Villager villager)) return;
-		if (tryCreateNaturalSpecial(villager, level)) return;
-		ensureSpecialTrade(villager);
-		if (cast(villager) == CastProfile.UNREACHABLE) {
-			UNREACHABLE_STATES.putIfAbsent(villager.getUUID(), new UnreachableState(ticks));
-		}
 		VILLAGER_STATES.put(villager.getUUID(), snapshot(villager, false));
 		VILLAGER_INVENTORIES.put(villager.getUUID(), inventoryCounts(villager));
-		EntitySpawnReason reason = villager.spawnReason();
-		if (reason == EntitySpawnReason.SPAWN_ITEM_USE || reason == EntitySpawnReason.DISPENSER) {
-			ServerPlayer player = nearestPlayer(level, villager.position(), 12.0);
-			PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), villager.isBaby() ? "abfwiv" : "vskjkl",
-				player == null ? null : player.getUUID(), ticks + 2L));
-		} else if (reason == EntitySpawnReason.BREEDING) {
-			Villager parent = nearbyVillagers(level, villager.position(), 12.0).stream()
-				.filter(other -> other != villager && !other.isBaby())
-				.min(Comparator.comparingDouble(other -> other.distanceToSqr(villager))).orElse(null);
-			if (parent != null) {
-				PENDING_SPEECH.add(new PendingSpeech(level, parent.getUUID(), "fbuabj", villager.getUUID(), ticks + 2L, true));
-				PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), "lgjtnf", parent.getUUID(),
-					ticks + DialogueCatalog.byId("fbuabj").durationTicks() + 4L));
-			} else PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), "lgjtnf", null, ticks + 2L));
-		} else if (reason == EntitySpawnReason.CONVERSION) {
-			PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), villager.isBaby() ? "ggitzq" : "ivumgm", null, ticks + 2L));
-		}
 	}
 
-	private static void processPendingSpeech() {
-		PENDING_SPEECH.removeIf(pending -> {
-			if (pending.dueTick > ticks) return false;
-			Entity speaker = pending.level.getEntity(pending.speakerId);
-			Entity target = pending.targetId == null ? null : pending.level.getEntity(pending.targetId);
-			if (speaker instanceof LivingEntity living && living.isAlive()) {
-				DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(pending.dialogueId);
-				boolean played = group != null && (pending.sharedAdult
-					? playSharedId(living, pending.dialogueId, "queued:" + living.getUUID() + ":" + pending.dialogueId, 1L, target)
-					: playId(living, pending.dialogueId, "queued:" + living.getUUID() + ":" + pending.dialogueId, 1L, target));
-				if (played
-						&& target instanceof LivingEntity listener) {
-					holdListener(listener, living, group.durationTicks());
-				}
-			}
-			return true;
-		});
+	private static void onEntityUnload(Entity entity) {
+		UUID id = entity.getUUID();
+		String encodedId = id.toString();
+		BUSY_UNTIL.remove(id);
+		ACTIVE_SOUNDS.remove(id);
+		SPEECH_TARGETS.remove(id);
+		LAST_SLEEPING.remove(id);
+		LAST_TRADER_INVISIBLE.remove(id);
+		VILLAGER_STATES.remove(id);
+		VILLAGER_INVENTORIES.remove(id);
+		NO_WORKSTATION_SINCE.remove(id);
+		LAST_DANGER.remove(id);
+		NO_BELL_SINCE.remove(id);
+		HEALTH_SNAPSHOT.remove(id);
+		PENDING_SPEECH.removeIf(pending -> pending.speakerId.equals(id) || id.equals(pending.targetId));
+		PAIR_TICKS.keySet().removeIf(pair -> pair.contains(encodedId));
 	}
 
-	private static void maintainSpeechTargets(MinecraftServer server) {
-		SPEECH_TARGETS.entrySet().removeIf(entry -> {
-			SpeechTarget speech = entry.getValue();
-			if (speech.untilTick <= ticks) return true;
-			for (ServerLevel level : server.getAllLevels()) {
-				Entity speaker = level.getEntity(entry.getKey());
-				if (!(speaker instanceof Mob mob) || !mob.isAlive()) continue;
-				Entity target = speech.targetId == null ? null : level.getEntity(speech.targetId);
-				Vec3 position = target != null && target.isAlive() ? target.getEyePosition() : speech.position;
-				if (speech.lockMovement) holdMob(mob, position);
-				else faceMob(mob, position);
-				return false;
-			}
-			return true;
-		});
-	}
-
-	private static void processTradeSessions(MinecraftServer server) {
-		ACTIVE_TRADES.entrySet().removeIf(entry -> {
-			ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
-			TradeSession session = entry.getValue();
-			if (player != null && player.containerMenu instanceof MerchantMenu) {
-				if (!session.opened) {
-					session.opened = true;
-					Entity trader = session.level.getEntity(session.traderId);
-					if (trader instanceof Villager villager) {
-						String id = tradeOpeningId(villager, player);
-						playId(villager, id, "trade_open:" + villager.getUUID() + ":" + id, SHORT_COOLDOWN, player);
-					} else if (trader instanceof WanderingTrader wanderingTrader) {
-						playId(wanderingTrader, "yubpbb", "trade_open:" + wanderingTrader.getUUID(), SHORT_COOLDOWN, player);
-					}
-				}
-				return false;
-			}
-			if (!session.opened && ticks - session.createdTick <= 20L) return false;
-			if (!session.opened && player != null) {
-				Entity trader = session.level.getEntity(session.traderId);
-				if (trader instanceof Villager villager) {
-					String id = unavailableTradeId(villager, player);
-					if (id != null) playId(villager, id, "trade_unavailable:" + villager.getUUID() + ":" + id, SHORT_COOLDOWN, player);
-				}
-			}
-			if (session.opened) {
-				Entity trader = session.level.getEntity(session.traderId);
-				if (trader instanceof Villager villager) {
-					CastProfile profile = cast(villager);
-					String id = switch (profile) {
-						case MAYOR -> session.completed ? "shrrya" : "bgzmea";
-						case TESTIFICATE_MAN -> session.completed ? "xcjort" : "rdugrl";
-						case NUMBER_5 -> session.completed ? "msofrj" : "lilimm";
-						case NUMBER_9 -> session.completed ? "czvvwy" : "lilimm";
-						default -> session.completed ? "czvvwy" : ticks % 2L == 0L ? "lilimm" : "laztau";
-					};
-					boolean played = playId(villager, id, "trade_close:" + villager.getUUID(), 10L, player);
-					if (!played) {
-						String fallback = profile == CastProfile.TESTIFICATE_MAN ? "ctzfzj"
-							: profile == CastProfile.NUMBER_5 ? "nfdery" : profile == CastProfile.NUMBER_9 ? "hvjfnk" : null;
-						if (fallback != null) playId(villager, fallback, "trade_close_fallback:" + villager.getUUID(), 10L, player);
-					}
-				} else if (trader instanceof WanderingTrader wanderingTrader) {
-					playId(wanderingTrader, session.completed ? "uzdvsi" : "erbcfn",
-						"trade_close:" + wanderingTrader.getUUID(), 10L, player);
-				}
-			}
-			return true;
-		});
-	}
-
-	private static String tradeOpeningId(Villager villager, Player player) {
-		CastProfile profile = cast(villager);
-		if (profile != CastProfile.VILLAGER) return profile.trade;
-		String unavailable = unavailableTradeId(villager, player);
-		if (unavailable != null) return unavailable;
-		int reputation = villager.getPlayerReputation(player);
-		if (reputation < -225) return "xduuwm";
-		if (reputation < -75) return "qmdvft";
-		if (reputation >= 75) return "vlrsrn";
-		if (reputation >= 25) return "kuhvdv";
-		return profile.trade;
-	}
-
-	private static String unavailableTradeId(Villager villager, Player player) {
-		if (cast(villager) != CastProfile.VILLAGER) return null;
-		String profession = profession(villager);
-		if (profession.equals("nitwit")) return "nukxsf";
-		if (profession.equals("none")) return "nlbhku";
-		if (villager.level() instanceof ServerLevel level && level.isRaided(villager.blockPosition())) return "klabhl";
-		if (villager.getOffers().isEmpty()) return "zalmof";
-		if (villager.getPlayerReputation(player) <= -150) return "lhdgsy";
-		return null;
-	}
-
-	private static ServerPlayer nearestPlayer(ServerLevel level, Vec3 position, double range) {
-		return level.players().stream()
-			.filter(Player::isAlive)
-			.filter(player -> player.distanceToSqr(position) <= range * range)
-			.min(Comparator.comparingDouble(player -> player.distanceToSqr(position)))
-			.orElse(null);
-	}
-
-	private static void processTimeChange(ServerLevel level) {
-		String key = level.dimension().identifier().toString();
-		long now = level.getOverworldClockTime();
-		Long before = LAST_LEVEL_TIME.put(key, now);
-		if (before == null || Math.abs(now - before) <= 40L || level.players().isEmpty()) return;
-		ServerPlayer player = level.players().getFirst();
-		Villager speaker = nearbyVillagers(level, player.position(), 32.0).stream()
-			.filter(villager -> !villager.isSleeping())
-			.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(player))).orElse(null);
-		if (speaker == null) return;
-		boolean wasDay = Math.floorMod(before, 24000L) < 12000L;
-		boolean isDay = Math.floorMod(now, 24000L) < 12000L;
-		String id = wasDay == isDay ? (speaker.isBaby() ? "durjjd" : "uqwdqn")
-			: isDay ? (speaker.isBaby() ? "wkwcrf" : "mgmzeh")
-			: (speaker.isBaby() ? "msemoe" : "ohdwnz");
-		playSharedId(speaker, id, "time_skip:" + key, SHORT_COOLDOWN, player);
-	}
-
-	private static void processDifficultyChange(ServerLevel level) {
-		String key = level.dimension().identifier().toString();
-		Difficulty difficulty = level.getDifficulty();
-		Difficulty previous = LAST_DIFFICULTY.put(key, difficulty);
-		if (previous == null || previous == difficulty || level.players().isEmpty()) return;
-		ServerPlayer player = level.players().getFirst();
-		Villager speaker = nearbyVillagers(level, player.position(), 32.0).stream()
-			.filter(villager -> !villager.isBaby() && !villager.isSleeping())
-			.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(player))).orElse(null);
-		if (speaker == null) return;
-		String id = difficulty == Difficulty.HARD ? "arzojk" : difficulty == Difficulty.PEACEFUL ? "xuyypm" : "ibcrvx";
-		playSharedId(speaker, id, "difficulty:" + key + ":" + difficulty.name(), SHORT_COOLDOWN, player);
-	}
-
-	private static void tick(MinecraftServer server) {
-		if (!server.tickRateManager().runsNormally()) {
-			stopActiveDialogue(server);
+	private static void tick(Minecraft minecraft) {
+		if (minecraft.level == null || minecraft.player == null || minecraft.isPaused()) {
+			if (minecraft.level == null) clearState();
 			return;
 		}
-		ticks++;
-		processUnreachableVillagers(server);
+		// Use the server-synced world time instead of a local per-client counter: every client
+		// connected to the same world sees the same value here, so periodic checks (ticks % N) and
+		// cooldown/busy deadlines line up across clients instead of drifting by however long each
+		// client happened to be running before this tick.
+		ticks = minecraft.level.getGameTime();
 		if (!VillagerNewsSettings.dialogueEnabled()) {
-			stopActiveDialogue(server);
-			ACTIVE_PLAYER_ENCOUNTERS.clear();
+			stopActiveDialogue(minecraft);
+			ACTIVE_PLAYER_ENCOUNTER.clear();
 			return;
 		}
 		ACTIVE_SOUNDS.entrySet().removeIf(entry -> entry.getValue().endTick <= ticks);
-		maintainSpeechTargets(server);
-		processPendingSleep();
+		maintainSpeechTargets(minecraft.level);
 		processPendingSpeech();
-		processTradeSessions(server);
+		processTradeSession(minecraft);
+		processDamageAndDeath(minecraft.level);
 		if (ticks % 10L != 0L) return;
 
-		for (ServerLevel level : server.getAllLevels()) {
-			processTimeChange(level);
-			processDifficultyChange(level);
-			for (ServerPlayer player : level.players()) {
-				if (player.gameMode().getName().equals("spectator")) {
-					ACTIVE_PLAYER_ENCOUNTERS.remove(player.getUUID());
-					PlayerObservation observation = PLAYER_OBSERVATIONS.computeIfAbsent(player.getUUID(), ignored -> new PlayerObservation());
-					observation.lastPosition = player.position();
-					observation.lastGameMode = "spectator";
-					observation.lastPlayerContext = null;
-					observation.stillTicks = 0;
-					observation.stareTicks = 0;
-					continue;
-				}
-				processPlayer(level, player);
-				processWanderingTrader(level, player);
-				processWooly(level, player);
-			}
-			if (ticks % 100L == 0L) processConversations(level);
+		ClientLevel level = minecraft.level;
+		processTimeChange(level);
+		processDifficultyChange(level);
+		List<AbstractClientPlayer> observable = observablePlayers(level);
+		if (minecraft.player.isSpectator()) ACTIVE_PLAYER_ENCOUNTER.remove(minecraft.player.getUUID());
+		for (Player observed : observable) {
+			processPlayer(level, observed);
+			processWanderingTrader(level, observed);
+			processWooly(level, observed);
 		}
+		if (ticks % 100L == 0L) for (Player observed : observable) processConversations(level, observed);
 
 		if (ticks % 1200L == 0L) {
 			COOLDOWNS.entrySet().removeIf(entry -> entry.getValue() + 20L * 600L < ticks);
 			BUSY_UNTIL.entrySet().removeIf(entry -> entry.getValue() < ticks);
+			LOCAL_REPUTATION.keySet().retainAll(VILLAGER_STATES.keySet());
 		}
 	}
 
@@ -557,8 +362,6 @@ public final class ContextualDialogueController {
 		COOLDOWNS.clear();
 		BUSY_UNTIL.clear();
 		ACTIVE_SOUNDS.clear();
-		PLAYER_OBSERVATIONS.clear();
-		PLAYER_DEATHS.clear();
 		LAST_SLEEPING.clear();
 		LAST_TRADER_INVISIBLE.clear();
 		VILLAGER_STATES.clear();
@@ -568,81 +371,23 @@ public final class ContextualDialogueController {
 		NO_WORKSTATION_SINCE.clear();
 		LAST_DANGER.clear();
 		NO_BELL_SINCE.clear();
-		ACTIVE_TRADES.clear();
-		UNREACHABLE_STATES.clear();
-		ACTIVE_PLAYER_ENCOUNTERS.clear();
-		PENDING_SLEEP.clear();
-		SLEEP_BYPASS.clear();
-		INTERRUPTED_SLEEP.clear();
-		PENDING_SPEECH.clear();
-		LAST_LEVEL_TIME.clear();
-		LAST_DIFFICULTY.clear();
+		HEALTH_SNAPSHOT.clear();
+		LOCAL_REPUTATION.clear();
 		PAIR_TICKS.clear();
+		ACTIVE_PLAYER_ENCOUNTER.clear();
+		PENDING_SPEECH.clear();
+		OBSERVATIONS.clear();
+		lastLevelTime = Long.MIN_VALUE;
+		lastDifficulty = null;
+		activeTrade = null;
 		ticks = 0L;
 	}
 
-	private static void processPendingSleep() {
-		PENDING_SLEEP.entrySet().removeIf(entry -> {
-			PendingSleep pending = entry.getValue();
-			ActiveSound active = ACTIVE_SOUNDS.get(entry.getKey());
-			if (active != null && active.endTick >= pending.dueTick) pending.dueTick = active.endTick + 1L;
-			if (pending.dueTick > ticks) return false;
-			Entity entity = pending.level.getEntity(entry.getKey());
-			if (entity instanceof Villager villager && villager.isAlive() && !villager.isSleeping()
-					&& villager.distanceToSqr(Vec3.atCenterOf(pending.bedPos)) <= 16.0
-					&& BuiltInRegistries.BLOCK.getKey(pending.level.getBlockState(pending.bedPos).getBlock()).getPath().endsWith("_bed")) {
-				if (!pending.bedtimeStarted) {
-					DialogueCatalog.DialogueGroup group = DialogueCatalog.byId("ioxtmt");
-					if (group != null && play(villager, group, "bed:" + villager.getUUID(), LONG_COOLDOWN,
-							null, Vec3.atCenterOf(pending.bedPos))) {
-						ActiveSound bedtime = ACTIVE_SOUNDS.get(villager.getUUID());
-						pending.bedtimeStarted = true;
-						pending.dueTick = bedtime == null ? ticks + group.durationTicks() : bedtime.endTick + 1L;
-						return false;
-					}
-				}
-				SLEEP_BYPASS.add(villager.getUUID());
-				try {
-					villager.startSleeping(pending.bedPos);
-				} finally {
-					SLEEP_BYPASS.remove(villager.getUUID());
-				}
-			}
-			return true;
-		});
-	}
-
-	public static boolean delayVillagerSleep(Villager villager, BlockPos bedPos) {
-		UUID id = villager.getUUID();
-		if (SLEEP_BYPASS.remove(id)) return false;
-		if (!(villager.level() instanceof ServerLevel level) || villager.isSleeping()) return false;
-		if (PENDING_SLEEP.containsKey(id)) return true;
-		ActiveSound active = ACTIVE_SOUNDS.get(id);
-		if (active != null && active.endTick > ticks) {
-			PENDING_SLEEP.put(id, new PendingSleep(level, bedPos.immutable(), active.endTick + 1L, false));
-			LAST_SLEEPING.put(id, false);
-			return true;
-		}
-		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId("ioxtmt");
-		if (group == null || !play(villager, group, "bed:" + id, LONG_COOLDOWN, null, Vec3.atCenterOf(bedPos))) return false;
-		ActiveSound bedtime = ACTIVE_SOUNDS.get(id);
-		long dueTick = bedtime == null ? ticks + group.durationTicks() : bedtime.endTick + 1L;
-		PENDING_SLEEP.put(id, new PendingSleep(level, bedPos.immutable(), dueTick, true));
-		LAST_SLEEPING.put(id, false);
-		return true;
-	}
-
-	private static void stopActiveDialogue(MinecraftServer server) {
+	private static void stopActiveDialogue(Minecraft minecraft) {
+		if (minecraft.level == null) return;
 		for (UUID id : List.copyOf(ACTIVE_SOUNDS.keySet())) {
-			LivingEntity speaker = null;
-			for (ServerLevel level : server.getAllLevels()) {
-				Entity entity = level.getEntity(id);
-				if (entity instanceof LivingEntity living) {
-					speaker = living;
-					break;
-				}
-			}
-			if (speaker != null) interrupt(speaker);
+			Entity entity = minecraft.level.getEntity(id);
+			if (entity instanceof LivingEntity speaker) interrupt(speaker);
 			else {
 				ACTIVE_SOUNDS.remove(id);
 				BUSY_UNTIL.remove(id);
@@ -651,142 +396,225 @@ public final class ContextualDialogueController {
 		}
 	}
 
-	private static void processWanderingTrader(ServerLevel level, ServerPlayer player) {
-		AABB area = AABB.ofSize(player.position(), OBSERVER_RANGE * 2.0, OBSERVER_RANGE, OBSERVER_RANGE * 2.0);
-		WanderingTrader trader = level.getEntitiesOfClass(WanderingTrader.class, area, Entity::isAlive).stream()
-			.filter(candidate -> candidate.hasLineOfSight(player))
-			.min(Comparator.comparingDouble(candidate -> candidate.distanceToSqr(player)))
-			.orElse(null);
+	// ---------------------------------------------------------------- trading
+
+	private static void processTradeSession(Minecraft minecraft) {
+		Player player = minecraft.player;
+		if (activeTrade == null) return;
+		boolean menuOpen = player.containerMenu instanceof MerchantMenu;
+		if (menuOpen) {
+			MerchantMenu menu = (MerchantMenu) player.containerMenu;
+			if (!activeTrade.opened) {
+				activeTrade.opened = true;
+				activeTrade.lastUsesTotal = usesTotal(menu);
+				Entity trader = minecraft.level.getEntity(activeTrade.traderId);
+				if (trader instanceof Villager villager) {
+					String id = tradeOpeningId(villager, player, menu.getOffers());
+					playId(villager, id, "trade_open:" + villager.getUUID() + ":" + id, SHORT_COOLDOWN, player);
+				} else if (trader instanceof WanderingTrader wanderingTrader) {
+					playId(wanderingTrader, "yubpbb", "trade_open:" + wanderingTrader.getUUID(), SHORT_COOLDOWN, player);
+				}
+			} else {
+				int uses = usesTotal(menu);
+				if (uses > activeTrade.lastUsesTotal) {
+					activeTrade.lastUsesTotal = uses;
+					activeTrade.completed = true;
+					onTradeCompleted(minecraft.level.getEntity(activeTrade.traderId), player);
+				}
+			}
+			return;
+		}
+		if (!activeTrade.opened && ticks - activeTrade.createdTick <= 20L) return;
+		Entity trader = minecraft.level.getEntity(activeTrade.traderId);
+		if (!activeTrade.opened) {
+			if (trader instanceof Villager villager) {
+				String id = unavailableTradeId(villager, player, null);
+				if (id != null) playId(villager, id, "trade_unavailable:" + villager.getUUID() + ":" + id, SHORT_COOLDOWN, player);
+			}
+		} else if (trader instanceof Villager villager) {
+			CastProfile profile = cast(villager);
+			String id = switch (profile) {
+				case MAYOR -> activeTrade.completed ? "shrrya" : "bgzmea";
+				case TESTIFICATE_MAN -> activeTrade.completed ? "xcjort" : "rdugrl";
+				case NUMBER_5 -> activeTrade.completed ? "msofrj" : "lilimm";
+				case NUMBER_9 -> activeTrade.completed ? "czvvwy" : "lilimm";
+				default -> activeTrade.completed ? "czvvwy" : ticks % 2L == 0L ? "lilimm" : "laztau";
+			};
+			boolean played = playId(villager, id, "trade_close:" + villager.getUUID(), 10L, player);
+			if (!played) {
+				String fallback = profile == CastProfile.TESTIFICATE_MAN ? "ctzfzj"
+					: profile == CastProfile.NUMBER_5 ? "nfdery" : profile == CastProfile.NUMBER_9 ? "hvjfnk" : null;
+				if (fallback != null) playId(villager, fallback, "trade_close_fallback:" + villager.getUUID(), 10L, player);
+			}
+		} else if (trader instanceof WanderingTrader wanderingTrader) {
+			playId(wanderingTrader, activeTrade.completed ? "uzdvsi" : "erbcfn",
+				"trade_close:" + wanderingTrader.getUUID(), 10L, player);
+		}
+		activeTrade = null;
+	}
+
+	private static int usesTotal(MerchantMenu menu) {
+		int total = 0;
+		for (MerchantOffer offer : menu.getOffers()) total += offer.getUses();
+		return total;
+	}
+
+	private static void onTradeCompleted(Entity trader, Player player) {
 		if (trader == null) return;
-		String pair = player.getUUID() + ":" + trader.getUUID();
-		if (playId(trader, "hxlyuc", "approach:" + pair, LONG_COOLDOWN, player)) return;
-		boolean invisible = trader.hasEffect(MobEffects.INVISIBILITY);
-		boolean wasInvisible = LAST_TRADER_INVISIBLE.put(trader.getUUID(), invisible) == Boolean.TRUE;
-		if (invisible) {
-			long llamas = level.getEntitiesOfClass(LivingEntity.class, AABB.ofSize(trader.position(), 24, 12, 24), Entity::isAlive)
-				.stream().filter(entity -> BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals("trader_llama")).count();
-			String id = wasInvisible ? "dbzjqi" : llamas >= 2 ? "myajyt" : llamas == 1 ? "jkeahu" : "vggdrt";
-			if (playId(trader, id, "invisible:" + trader.getUUID() + ":" + id, LONG_COOLDOWN, player)) return;
-		}
-		if (level.isRainingAt(trader.blockPosition())
-				&& playId(trader, "kxoqky", "rain:" + trader.getUUID(), LONG_COOLDOWN)) return;
-		if (ticks % 100L == 0L && trader.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
-			playId(trader, "stqafd", "idle:" + trader.getUUID(), LONG_COOLDOWN);
+		bumpReputation(trader.getUUID(), 3);
+		String id = null;
+		if (trader instanceof Villager villager && cast(villager) == CastProfile.VILLAGER) id = "xmkwxd";
+		else if (trader instanceof WanderingTrader) id = "bvrbhy";
+		if (id != null && trader instanceof LivingEntity livingTrader) {
+			long due = Math.max(ticks + 1L, BUSY_UNTIL.getOrDefault(trader.getUUID(), ticks) + 1L);
+			PENDING_SPEECH.add(new PendingSpeech(livingTrader.getUUID(), id, player.getUUID(), due, false));
 		}
 	}
 
-	private static void processWooly(ServerLevel level, ServerPlayer player) {
-		AABB area = AABB.ofSize(player.position(), OBSERVER_RANGE * 2.0, OBSERVER_RANGE, OBSERVER_RANGE * 2.0);
-		Sheep wooly = level.getEntitiesOfClass(Sheep.class, area, sheep -> sheep.isAlive() && isWooly(sheep)
-			&& !sheep.entityTags().contains(DIALOGUE_TEST_TAG)).stream()
-			.filter(candidate -> candidate.hasLineOfSight(player))
-			.min(Comparator.comparingDouble(candidate -> candidate.distanceToSqr(player)))
-			.orElse(null);
-		if (wooly == null) return;
-		String pair = player.getUUID() + ":" + wooly.getUUID();
-		if (playId(wooly, "uvtocs", "approach:" + pair, LONG_COOLDOWN, player)) return;
-		if (ticks % 100L == 0L && wooly.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
-			playId(wooly, "vmohcm", "idle:" + wooly.getUUID(), LONG_COOLDOWN);
-		}
+	private static String tradeOpeningId(Villager villager, Player player, net.minecraft.world.item.trading.MerchantOffers offers) {
+		CastProfile profile = cast(villager);
+		if (profile != CastProfile.VILLAGER) return profile.trade;
+		String unavailable = unavailableTradeId(villager, player, offers);
+		if (unavailable != null) return unavailable;
+		int reputation = localReputation(villager);
+		if (reputation < -225) return "xduuwm";
+		if (reputation < -75) return "qmdvft";
+		if (reputation >= 75) return "vlrsrn";
+		if (reputation >= 25) return "kuhvdv";
+		return profile.trade;
 	}
 
-	private static void processUnreachableVillagers(MinecraftServer server) {
-		Set<UUID> processed = new HashSet<>();
-		for (ServerLevel level : server.getAllLevels()) {
-			for (ServerPlayer player : level.players()) {
-				AABB area = player.getBoundingBox().inflate(16.0);
-				for (Villager villager : level.getEntitiesOfClass(Villager.class, area,
-						candidate -> candidate.isAlive() && cast(candidate) == CastProfile.UNREACHABLE)) {
-					if (processed.contains(villager.getUUID())) continue;
-					ServerPlayer nearest = nearestPlayer(level, villager.position(), 16.0);
-					if (nearest != null) {
-						processed.add(villager.getUUID());
-						updateUnreachable(villager, nearest);
-					}
+	/**
+	 * {@code offers} is only available when a {@link MerchantMenu} is actually open for this
+	 * villager (trades are lazily generated server-side; {@code AbstractVillager.getOffers()}
+	 * throws on the client outside of that case) - pass {@code null} when checking a villager
+	 * whose trade screen was never opened, which simply skips the empty-offers check.
+	 */
+	private static String unavailableTradeId(Villager villager, Player player, net.minecraft.world.item.trading.MerchantOffers offers) {
+		if (cast(villager) != CastProfile.VILLAGER) return null;
+		String profession = profession(villager);
+		if (profession.equals("nitwit")) return "nukxsf";
+		if (profession.equals("none")) return "nlbhku";
+		if (nearbyRaid(villager.level(), villager.blockPosition())) return "klabhl";
+		if (offers != null && offers.isEmpty()) return "zalmof";
+		if (localReputation(villager) <= -150) return "lhdgsy";
+		return null;
+	}
+
+	// ---------------------------------------------------------------- local reputation proxy
+
+	private static int localReputation(Villager villager) {
+		return LOCAL_REPUTATION.getOrDefault(villager.getUUID(), 0);
+	}
+
+	private static void bumpReputation(UUID villagerId, int delta) {
+		LOCAL_REPUTATION.merge(villagerId, delta, (oldValue, addend) -> Math.max(-300, Math.min(300, oldValue + addend)));
+	}
+
+	private static boolean isNegativeReputation(Villager villager, Player player) {
+		return localReputation(villager) < -75;
+	}
+
+	private static String reputationApproach(Villager villager, Player player) {
+		if (player.hasEffect(MobEffects.HERO_OF_THE_VILLAGE)) return "gnetsk";
+		int reputation = localReputation(villager);
+		if (reputation < -225) {
+			return BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().endsWith("_sword")
+				? "stuirs" : "zstdjn";
+		}
+		if (reputation < -75) return "tfzlsw";
+		if (reputation >= 75) return "kcbenk";
+		if (reputation >= 25) return "omgcte";
+		return "xfpjxq";
+	}
+
+	/** Real raid detection needs server-only {@code ServerLevel#isRaided}; approximate with a nearby-raider headcount. */
+	private static boolean nearbyRaid(Level level, BlockPos pos) {
+		long raiders = level.getEntitiesOfClass(LivingEntity.class, AABB.ofSize(Vec3.atCenterOf(pos), 48, 24, 48), Entity::isAlive)
+			.stream().filter(entity -> RAIDER_TYPES.contains(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath())).count();
+		return raiders >= 3;
+	}
+
+	// ---------------------------------------------------------------- time / difficulty
+
+	private static void processTimeChange(ClientLevel level) {
+		long now = level.getOverworldClockTime();
+		long before = lastLevelTime;
+		lastLevelTime = now;
+		if (before == Long.MIN_VALUE || Math.abs(now - before) <= 40L) return;
+		List<AbstractClientPlayer> observers = observablePlayers(level);
+		Villager speaker = nearestVillagerToAnyObserver(level, observers, 32.0, villager -> !villager.isSleeping());
+		if (speaker == null) return;
+		boolean wasDay = Math.floorMod(before, 24000L) < 12000L;
+		boolean isDay = Math.floorMod(now, 24000L) < 12000L;
+		String id = wasDay == isDay ? (speaker.isBaby() ? "durjjd" : "uqwdqn")
+			: isDay ? (speaker.isBaby() ? "wkwcrf" : "mgmzeh")
+			: (speaker.isBaby() ? "msemoe" : "ohdwnz");
+		Player target = nearestOf(observers, speaker);
+		playSharedId(speaker, id, "time_skip", SHORT_COOLDOWN, target);
+	}
+
+	private static void processDifficultyChange(ClientLevel level) {
+		Difficulty difficulty = level.getDifficulty();
+		Difficulty previous = lastDifficulty;
+		lastDifficulty = difficulty;
+		if (previous == null || previous == difficulty) return;
+		List<AbstractClientPlayer> observers = observablePlayers(level);
+		Villager speaker = nearestVillagerToAnyObserver(level, observers, 32.0,
+			villager -> !villager.isBaby() && !villager.isSleeping());
+		if (speaker == null) return;
+		String id = difficulty == Difficulty.HARD ? "arzojk" : difficulty == Difficulty.PEACEFUL ? "xuyypm" : "ibcrvx";
+		Player target = nearestOf(observers, speaker);
+		playSharedId(speaker, id, "difficulty:" + difficulty.name(), SHORT_COOLDOWN, target);
+	}
+
+	/**
+	 * Nearest eligible villager to any of {@code observers} (not just the local player), so every
+	 * client - each with its own local player at a slightly different position - converges on the
+	 * same villager. Ties (including float-imprecise equal distances) are broken by villager UUID for
+	 * determinism across independently-running clients.
+	 */
+	private static Villager nearestVillagerToAnyObserver(ClientLevel level, List<? extends Player> observers, double range,
+			java.util.function.Predicate<Villager> filter) {
+		Villager best = null;
+		double bestDistanceSqr = Double.MAX_VALUE;
+		for (Player observer : observers) {
+			for (Villager candidate : nearbyVillagers(level, observer.position(), range)) {
+				if (!filter.test(candidate)) continue;
+				double distanceSqr = candidate.distanceToSqr(observer);
+				if (best == null || distanceSqr < bestDistanceSqr
+						|| (distanceSqr == bestDistanceSqr && candidate.getUUID().compareTo(best.getUUID()) < 0)) {
+					best = candidate;
+					bestDistanceSqr = distanceSqr;
 				}
 			}
 		}
-		UNREACHABLE_STATES.entrySet().removeIf(entry -> {
-			if (processed.contains(entry.getKey())) return false;
-			for (ServerLevel level : server.getAllLevels()) {
-				Entity entity = level.getEntity(entry.getKey());
-				if (entity instanceof Villager villager && villager.isAlive()
-						&& cast(villager) == CastProfile.UNREACHABLE) {
-					villager.getNavigation().stop();
-					entry.getValue().stopFleeing(ticks);
-					return false;
-				}
-			}
-			return true;
-		});
+		return best;
 	}
 
-	private static void updateUnreachable(Villager villager, ServerPlayer player) {
-		UnreachableState state = UNREACHABLE_STATES.computeIfAbsent(villager.getUUID(), ignored -> new UnreachableState(ticks));
-		state.updateFleeing(ticks);
-		double distance = villager.distanceTo(player);
-		if (distance <= 4.0) teleportUnreachable(villager, player);
-		villager.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
-		if (ticks >= state.nextPathTick || villager.getNavigation().isDone()) {
-			Vec3 destination = DefaultRandomPos.getPosAway(villager, 16, 7, player.position());
-			if (destination == null || destination.distanceToSqr(player.position()) <= villager.distanceToSqr(player)) {
-				Vec3 away = villager.position().subtract(player.position());
-				if (away.horizontalDistanceSqr() < 0.0001) {
-					double angle = villager.getRandom().nextDouble() * Math.PI * 2.0;
-					away = new Vec3(Math.cos(angle), 0.0, Math.sin(angle));
-				} else away = new Vec3(away.x, 0.0, away.z).normalize();
-				destination = villager.position().add(away.scale(16.0));
-			}
-			villager.getNavigation().moveTo(destination.x, destination.y, destination.z, 0.9);
-			state.nextPathTick = ticks + 10L;
-		}
-		if (distance <= 12.0) {
-			faceMob(villager, player.getEyePosition());
-		}
-		if (state.canTaunt(ticks)
-				&& playId(villager, "eltxge", "unreachable_taunt:" + villager.getUUID(), 1L, player)) {
-			state.taunted(ticks);
-		}
+	/** The observer nearest to {@code subject}, for use as a deterministic {@code target} entity. */
+	private static Player nearestOf(List<? extends Player> observers, Entity subject) {
+		return observers.stream().min(Comparator.comparingDouble((Player candidate) -> candidate.distanceToSqr(subject))
+			.thenComparing(Player::getUUID)).orElse(null);
 	}
 
-	private static void repelPlayer(Villager villager, Player player) {
-		if (villager.distanceToSqr(player) <= 16.0) teleportUnreachable(villager, player);
-		if (player instanceof ServerPlayer serverPlayer && villager.distanceTo(player) <= 16.0) {
-			updateUnreachable(villager, serverPlayer);
-		}
-	}
+	// ---------------------------------------------------------------- player observation
 
-	private static boolean teleportUnreachable(Villager villager, Player player) {
-		Vec3 away = villager.position().subtract(player.position());
-		double baseAngle = away.horizontalDistanceSqr() < 0.0001
-			? villager.getRandom().nextDouble() * Math.PI * 2.0
-			: Math.atan2(away.z, away.x);
-		for (int attempt = 0; attempt < 24; attempt++) {
-			double angle = baseAngle + (villager.getRandom().nextDouble() - 0.5) * Math.PI * 0.75;
-			double distance = 14.0 + villager.getRandom().nextDouble() * 4.0;
-			double x = villager.getX() + Math.cos(angle) * distance;
-			double y = villager.getY() + villager.getRandom().nextInt(11) - 5;
-			double z = villager.getZ() + Math.sin(angle) * distance;
-			if (villager.randomTeleport(x, y, z, true)) {
-				villager.getNavigation().stop();
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private static void processPlayer(ServerLevel level, ServerPlayer player) {
-		PlayerObservation observation = PLAYER_OBSERVATIONS.computeIfAbsent(player.getUUID(), ignored -> new PlayerObservation());
-		String gameMode = player.gameMode().getName();
-		boolean changedGameMode = observation.lastGameMode != null && !observation.lastGameMode.equals(gameMode);
-		observation.lastGameMode = gameMode;
+	private static void processPlayer(ClientLevel level, Player player) {
+		PlayerObservation observation = observationFor(player);
+		Minecraft minecraft = Minecraft.getInstance();
+		// There's no synced GameType for a remote player's exact game mode on the client, so this
+		// observation is left local-player-only; guarded here so it's simply skipped for others.
+		String gameMode = player != minecraft.player || minecraft.gameMode == null ? "" : minecraft.gameMode.getPlayerMode().getName();
+		boolean changedGameMode = player == minecraft.player && observation.lastGameMode != null && !observation.lastGameMode.equals(gameMode);
+		if (player == minecraft.player) observation.lastGameMode = gameMode;
 		Vec3 movement = player.position().subtract(observation.lastPosition);
 		if (movement.horizontalDistanceSqr() < 0.0004 && Math.abs(movement.y) < 0.01) observation.stillTicks += 10;
 		else observation.stillTicks = 0;
 		observation.lastPosition = player.position();
 		BlockPos ground = player.blockPosition().below();
 		String groundBlock = BuiltInRegistries.BLOCK.getKey(level.getBlockState(ground).getBlock()).getPath();
-		if (ground.equals(observation.lastGroundPos) && observation.lastGroundBlock.equals("farmland") && groundBlock.equals("dirt")) {
+		if (ground.equals(observation.lastGroundPos) && "farmland".equals(observation.lastGroundBlock) && groundBlock.equals("dirt")) {
 			playObserved(level, player, player.position(), "Trample Crops", SHORT_COOLDOWN);
 		}
 		observation.lastGroundPos = ground;
@@ -805,16 +633,16 @@ public final class ContextualDialogueController {
 				.filter(villager -> cast(villager) != CastProfile.UNREACHABLE).filter(villager -> villager.hasLineOfSight(player))
 				.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(player))).orElse(null);
 			if (baby != null) {
-				boolean firstNotice = ACTIVE_PLAYER_ENCOUNTERS.add(player.getUUID());
+				boolean firstNotice = ACTIVE_PLAYER_ENCOUNTER.add(player.getUUID());
 				if (ticks % 40L == 0L && playNearbyEntityContext(level, baby)) return;
 				String id = player.hasEffect(MobEffects.HERO_OF_THE_VILLAGE) ? "fzyrfm"
 					: isNegativeReputation(baby, player) ? "jfuftm" : "wtuguc";
 				if (firstNotice) playId(baby, id, "player_greeting:" + player.getUUID(), LONG_COOLDOWN, player);
-			} else ACTIVE_PLAYER_ENCOUNTERS.remove(player.getUUID());
+			} else ACTIVE_PLAYER_ENCOUNTER.remove(player.getUUID());
 			return;
 		}
 
-		boolean firstNotice = ACTIVE_PLAYER_ENCOUNTERS.add(player.getUUID());
+		boolean firstNotice = ACTIVE_PLAYER_ENCOUNTER.add(player.getUUID());
 		String pair = player.getUUID() + ":" + adult.getUUID();
 		if (playCosmeticObservation(player, adult)) return;
 		if (player.getBoundingBox().inflate(0.15).intersects(adult.getBoundingBox()) && movement.horizontalDistanceSqr() > 0.002) {
@@ -822,8 +650,8 @@ public final class ContextualDialogueController {
 				? "zvbnea" : "ajexrq";
 			if (playId(adult, id, "nudge:" + adult.getUUID(), SHORT_COOLDOWN, player)) return;
 		}
-		if (changedGameMode && playSharedId(adult, gameMode.equals("creative") ? "ohtblt" : "fhhqxg",
-				"gamemode:" + player.getUUID() + ":" + gameMode, SHORT_COOLDOWN, player)) return;
+		if (changedGameMode && playSharedId(adult, gameMode.equals("Creative") ? "ohtblt" : "fhhqxg",
+				"gamemode:" + gameMode, SHORT_COOLDOWN, player)) return;
 		CastProfile adultProfile = cast(adult);
 		if (firstNotice && adultProfile != CastProfile.VILLAGER && player.hasEffect(MobEffects.HERO_OF_THE_VILLAGE)
 				&& playSharedId(adult, "gnetsk", "player_greeting:" + player.getUUID(), LONG_COOLDOWN, player)) return;
@@ -847,11 +675,11 @@ public final class ContextualDialogueController {
 			return;
 		}
 
-		String playerContext = playerContext(player, adult);
+		String playerContext = playerContext(player);
 		boolean changedPlayerContext = playerContext != null && !playerContext.equals(observation.lastPlayerContext);
 		observation.lastPlayerContext = playerContext;
 		if (changedPlayerContext && playSharedTitle(adult, playerContext,
-				"player_context:" + player.getUUID() + ":" + playerContext, LONG_COOLDOWN, player)) return;
+				"player_context:" + playerContext, LONG_COOLDOWN, player)) return;
 		long nearbyPlayers = level.players().stream().filter(other -> other.distanceToSqr(adult) <= 64.0).count();
 		if (nearbyPlayers >= 2 && playSharedId(adult, "cstyvg", "player_crowd:" + adult.getUUID(), LONG_COOLDOWN, player)) return;
 
@@ -875,7 +703,7 @@ public final class ContextualDialogueController {
 		}
 	}
 
-	private static String environmentContext(ServerLevel level, Villager villager) {
+	private static String environmentContext(Level level, Villager villager) {
 		Entity vehicle = villager.getVehicle();
 		if (vehicle != null) {
 			String vehiclePath = BuiltInRegistries.ENTITY_TYPE.getKey(vehicle.getType()).getPath();
@@ -910,7 +738,7 @@ public final class ContextualDialogueController {
 		return null;
 	}
 
-	private static String timeContext(ServerLevel level, Villager villager) {
+	private static String timeContext(Level level, Villager villager) {
 		float sunAngle = level.environmentAttributes().getValue(EnvironmentAttributes.SUN_ANGLE, villager.blockPosition());
 		if (sunAngle < 0.125F || sunAngle >= 0.875F) return "Morning";
 		if (sunAngle < 0.45F) return "Afternoon";
@@ -953,9 +781,14 @@ public final class ContextualDialogueController {
 		return choices.get(Math.floorMod((int) (ticks / LONG_COOLDOWN), choices.size()));
 	}
 
-	private static String playerContext(ServerPlayer player, Villager villager) {
+	private static String playerContext(Player player) {
 		if (player.isFallFlying()) return "Glide with Elytra";
-		if (player.gameMode().getName().equals("creative") && player.getAbilities().flying) return "Fly in Creative Mode";
+		// No synced GameType for a remote player, so we can't confirm CREATIVE specifically here -
+		// but the flying ability flag itself is synced per-entity for every player, and only
+		// creative/spectator players can have it set, so checking it alone (minus spectators, who
+		// are excluded from observation elsewhere but guarded here too for safety) generalizes this
+		// correctly without needing the exact game mode.
+		if (!player.isSpectator() && player.getAbilities().flying) return "Fly in Creative Mode";
 		if (player.isShiftKeyDown() && player.getDeltaMovement().horizontalDistanceSqr() > 0.002) return "Crouch-Walk";
 		if (player.getHealth() <= player.getMaxHealth() * 0.3F) return "Low Health";
 		if (player.hasEffect(MobEffects.INVISIBILITY)) return "Invisibility";
@@ -992,137 +825,159 @@ public final class ContextualDialogueController {
 		return null;
 	}
 
-	private static String reputationApproach(Villager villager, ServerPlayer player) {
-		if (player.hasEffect(MobEffects.HERO_OF_THE_VILLAGE)) return "gnetsk";
-		int reputation = villager.getPlayerReputation(player);
-		if (reputation < -225) {
-			return BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().endsWith("_sword")
-				? "stuirs" : "zstdjn";
-		}
-		if (reputation < -75) return "tfzlsw";
-		if (reputation >= 75) return "kcbenk";
-		if (reputation >= 25) return "omgcte";
-		return "xfpjxq";
-	}
-
-	private static boolean isNegativeReputation(Villager villager, ServerPlayer player) {
-		return villager.getPlayerReputation(player) < -75;
-	}
-
-	private static boolean playCosmeticObservation(ServerPlayer player, Villager villager) {
+	private static boolean playCosmeticObservation(Player player, Villager villager) {
 		ItemStack head = player.getItemBySlot(EquipmentSlot.HEAD);
 		ItemStack held = player.getMainHandItem();
 		CastProfile profile = cast(villager);
 		String id = null;
-		if (head.getItem() == VillagerNewsItems.VILLAGER_NOSE) id = "kejscw";
-		else if (head.getItem() == VillagerNewsItems.MAYOR_HAT && profile == CastProfile.MAYOR) id = "cmkesu";
-		else if (head.getItem() == VillagerNewsItems.TESTIFICATE_MAN_HELMET && profile == CastProfile.TESTIFICATE_MAN) id = "rooiup";
-		else if (head.getItem() == VillagerNewsItems.MOUSTACHE && profile == CastProfile.NUMBER_5) id = "mjyhgw";
-		else if (held.getItem() == VillagerNewsItems.MICROPHONE && profile == CastProfile.NUMBER_9) id = "adhvqz";
+		if (head.getItem() == com.vnap.item.VillagerNewsItems.VILLAGER_NOSE) id = "kejscw";
+		else if (head.getItem() == com.vnap.item.VillagerNewsItems.MAYOR_HAT && profile == CastProfile.MAYOR) id = "cmkesu";
+		else if (head.getItem() == com.vnap.item.VillagerNewsItems.TESTIFICATE_MAN_HELMET && profile == CastProfile.TESTIFICATE_MAN) id = "rooiup";
+		else if (head.getItem() == com.vnap.item.VillagerNewsItems.MOUSTACHE && profile == CastProfile.NUMBER_5) id = "mjyhgw";
+		else if (held.getItem() == com.vnap.item.VillagerNewsItems.MICROPHONE && profile == CastProfile.NUMBER_9) id = "adhvqz";
 		if (id == null) return false;
-		String key = "player_cosmetic:" + villager.getUUID() + ":" + player.getUUID() + ":" + id;
+		String key = "player_cosmetic:" + villager.getUUID() + ":" + id;
 		return id.equals("kejscw") ? playSharedId(villager, id, key, LONG_COOLDOWN, player)
 			: playId(villager, id, key, LONG_COOLDOWN, player);
 	}
 
-	private static void processConversations(ServerLevel level) {
-		Set<UUID> updatedVillagers = new HashSet<>();
-		for (ServerPlayer player : level.players()) {
-			for (Villager villager : nearbyVillagers(level, player.position(), 24)) {
-				if (cast(villager) != CastProfile.UNREACHABLE && updatedVillagers.add(villager.getUUID())) processVillagerState(villager);
-			}
+	// ---------------------------------------------------------------- wandering trader / wooly
+
+	private static void processWanderingTrader(Level level, Player player) {
+		AABB area = AABB.ofSize(player.position(), OBSERVER_RANGE * 2.0, OBSERVER_RANGE, OBSERVER_RANGE * 2.0);
+		WanderingTrader trader = level.getEntitiesOfClass(WanderingTrader.class, area, Entity::isAlive).stream()
+			.filter(candidate -> candidate.hasLineOfSight(player))
+			.min(Comparator.comparingDouble(candidate -> candidate.distanceToSqr(player)))
+			.orElse(null);
+		if (trader == null) return;
+		String pair = player.getUUID() + ":" + trader.getUUID();
+		if (playId(trader, "hxlyuc", "approach:" + pair, LONG_COOLDOWN, player)) return;
+		boolean invisible = trader.hasEffect(MobEffects.INVISIBILITY);
+		boolean wasInvisible = LAST_TRADER_INVISIBLE.put(trader.getUUID(), invisible) == Boolean.TRUE;
+		if (invisible) {
+			long llamas = level.getEntitiesOfClass(LivingEntity.class, AABB.ofSize(trader.position(), 24, 12, 24), Entity::isAlive)
+				.stream().filter(entity -> BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals("trader_llama")).count();
+			String id = wasInvisible ? "dbzjqi" : llamas >= 2 ? "myajyt" : llamas == 1 ? "jkeahu" : "vggdrt";
+			if (playId(trader, id, "invisible:" + trader.getUUID() + ":" + id, LONG_COOLDOWN, player)) return;
+		}
+		if (level.isRainingAt(trader.blockPosition())
+				&& playId(trader, "kxoqky", "rain:" + trader.getUUID(), LONG_COOLDOWN)) return;
+		if (ticks % 100L == 0L && trader.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
+			playId(trader, "stqafd", "idle:" + trader.getUUID(), LONG_COOLDOWN);
+		}
+	}
+
+	private static void processWooly(Level level, Player player) {
+		AABB area = AABB.ofSize(player.position(), OBSERVER_RANGE * 2.0, OBSERVER_RANGE, OBSERVER_RANGE * 2.0);
+		Sheep wooly = level.getEntitiesOfClass(Sheep.class, area, sheep -> sheep.isAlive() && isWooly(sheep)).stream()
+			.filter(candidate -> candidate.hasLineOfSight(player))
+			.min(Comparator.comparingDouble(candidate -> candidate.distanceToSqr(player)))
+			.orElse(null);
+		if (wooly == null) return;
+		String pair = player.getUUID() + ":" + wooly.getUUID();
+		if (playId(wooly, "uvtocs", "approach:" + pair, LONG_COOLDOWN, player)) return;
+		if (ticks % 100L == 0L && wooly.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
+			playId(wooly, "vmohcm", "idle:" + wooly.getUUID(), LONG_COOLDOWN);
+		}
+	}
+
+	// ---------------------------------------------------------------- villager state / conversations
+
+	private static void processConversations(Level level, Player player) {
+		for (Villager villager : nearbyVillagers(level, player.position(), 24)) {
+			if (cast(villager) != CastProfile.UNREACHABLE) processVillagerState(villager);
 		}
 		Set<String> checkedPairs = new HashSet<>();
-		for (ServerPlayer player : level.players()) {
-			List<Villager> villagers = nearbyVillagers(level, player.position(), 24).stream()
-				.filter(villager -> !villager.isBaby() && !villager.isSleeping())
-				.filter(villager -> cast(villager) != CastProfile.UNREACHABLE).toList();
-			for (Villager subject : villagers) {
-				if (data(subject).vnap$cosmetic() == 0) continue;
-				Villager witness = villagers.stream().filter(other -> other != subject && other.hasLineOfSight(subject))
-					.min(Comparator.comparingDouble(other -> other.distanceToSqr(subject))).orElse(null);
-				if (witness != null) {
-					String id = cast(witness) == CastProfile.TESTIFICATE_MAN && data(subject).vnap$cosmetic() == 2 ? "pbbywc" : "anrhns";
-					if (playSharedId(witness, id, "cosmetic_witness:" + witness.getUUID() + ":" + subject.getUUID() + ":" + id,
-						LONG_COOLDOWN, subject)) return;
+		List<Villager> villagers = nearbyVillagers(level, player.position(), 24).stream()
+			.filter(villager -> !villager.isBaby() && !villager.isSleeping())
+			.filter(villager -> cast(villager) != CastProfile.UNREACHABLE).toList();
+		for (Villager subject : villagers) {
+			int cosmetic = VillagerCosmetics.cosmeticFor(cast(subject));
+			if (cosmetic == 0) continue;
+			Villager witness = villagers.stream().filter(other -> other != subject && other.hasLineOfSight(subject))
+				.min(Comparator.comparingDouble(other -> other.distanceToSqr(subject))).orElse(null);
+			if (witness != null) {
+				String id = cast(witness) == CastProfile.TESTIFICATE_MAN && cosmetic == 2 ? "pbbywc" : "anrhns";
+				if (playSharedId(witness, id, "cosmetic_witness:" + witness.getUUID() + ":" + subject.getUUID() + ":" + id,
+					LONG_COOLDOWN, subject)) return;
+			}
+		}
+		if (villagers.size() >= 8 && playSharedId(villagers.getFirst(), "kzemrz", "villager_crowd:" + player.getUUID(), LONG_COOLDOWN, player)) return;
+		Villager gatheringSpeaker = villagers.stream().filter(villager -> cast(villager) == CastProfile.VILLAGER).findFirst().orElse(null);
+		Villager gatheringTarget = gatheringSpeaker == null ? null : nearestConversationPartner(gatheringSpeaker, villagers);
+		if (gatheringTarget != null && villagers.size() >= 3 && playId(gatheringSpeaker, "ebfifz",
+				"gathering:" + player.getUUID(), LONG_COOLDOWN, gatheringTarget)) return;
+		for (int firstIndex = 0; firstIndex < villagers.size(); firstIndex++) {
+			Villager first = villagers.get(firstIndex);
+			Villager nearestPartner = nearestConversationPartner(first, villagers);
+			if (nearestPartner == null) continue;
+			for (int secondIndex = firstIndex + 1; secondIndex < villagers.size(); secondIndex++) {
+				Villager second = villagers.get(secondIndex);
+				String pair = orderedPair(first.getUUID(), second.getUUID());
+				if (second != nearestPartner || !checkedPairs.add(pair) || isBusy(first) || isBusy(second)) continue;
+				long firstSeenTogether = PAIR_TICKS.computeIfAbsent(pair, key -> ticks);
+				long togetherTicks = ticks - firstSeenTogether;
+				if (togetherTicks < 200) continue;
+				boolean firstHasNose = VillagerCosmetics.hasNose(first.getUUID());
+				boolean secondHasNose = VillagerCosmetics.hasNose(second.getUUID());
+				if (!firstHasNose || !secondHasNose) {
+					boolean bothMissing = !firstHasNose && !secondHasNose;
+					Villager conversationSpeaker = !bothMissing && !firstHasNose ? second : first;
+					Villager conversationSubject = conversationSpeaker == first ? second : first;
+					List<List<String>> choices = bothMissing
+						? TWO_MISSING_NOSES_CONVERSATIONS : ONE_MISSING_NOSE_CONVERSATIONS;
+					List<String> sequence = choices.get(Math.floorMod(pair.hashCode() + (int) (ticks / LONG_COOLDOWN), choices.size()));
+					if (playId(conversationSpeaker, sequence.getFirst(), "nose_conversation:" + pair + ":" + sequence.getFirst(),
+							LONG_COOLDOWN, conversationSubject)) {
+						holdListener(conversationSubject, conversationSpeaker, DialogueCatalog.byId(sequence.getFirst()).durationTicks());
+						queueConversation(conversationSpeaker, conversationSubject, sequence);
+						PAIR_TICKS.put(pair, ticks);
+					}
+					return;
+				}
+				CastProfile firstCast = cast(first);
+				CastProfile secondCast = cast(second);
+				String meetId = meetDialogue(firstCast == CastProfile.VILLAGER ? secondCast : firstCast);
+				if (meetId != null && (firstCast == CastProfile.VILLAGER || secondCast == CastProfile.VILLAGER)) {
+					Villager speaker = firstCast == CastProfile.VILLAGER ? first : second;
+					Villager subject = speaker == first ? second : first;
+					if (playId(speaker, meetId, "meet:" + pair, LONG_COOLDOWN, subject)) {
+						holdListener(subject, speaker, 80L);
+						PAIR_TICKS.put(pair, ticks);
+					}
+					return;
+				}
+				boolean atCampfire = nearBlock(level, first.blockPosition(), "campfire", 4)
+					&& nearBlock(level, second.blockPosition(), "campfire", 4);
+				boolean negativeGossip = isNegativeReputation(first, player) || isNegativeReputation(second, player);
+				String conversation = atCampfire ? CAMPFIRE_CONVERSATION.getFirst()
+					: first.getVehicle() != null && first.getVehicle() == second.getVehicle()
+					? "zqfvby"
+					: negativeGossip && first.getDeltaMovement().horizontalDistanceSqr()
+						+ second.getDeltaMovement().horizontalDistanceSqr() < 0.0004
+						? (Math.floorMod(pair.hashCode() + (int) (ticks / LONG_COOLDOWN), 2) == 0 ? "wrjbdd" : GOSSIP_CONVERSATION.getFirst())
+						: wanderingConversation(pair).getFirst();
+				if (playId(first, conversation, "conversation:" + pair + ":" + conversation, LONG_COOLDOWN, second)) {
+					holdListener(second, first, DialogueCatalog.byId(conversation).durationTicks());
+					if (conversation.startsWith("gmrypk")) queueConversation(first, second, wanderingConversation(pair));
+					else if (atCampfire) queueConversation(first, second, CAMPFIRE_CONVERSATION);
+					else if (conversation.equals(GOSSIP_CONVERSATION.getFirst())) queueConversation(first, second, GOSSIP_CONVERSATION);
+					PAIR_TICKS.put(pair, ticks);
+					return;
 				}
 			}
-			if (villagers.size() >= 8 && playSharedId(villagers.getFirst(), "kzemrz", "villager_crowd:" + player.getUUID(), LONG_COOLDOWN, player)) return;
-			Villager gatheringSpeaker = villagers.stream().filter(villager -> cast(villager) == CastProfile.VILLAGER).findFirst().orElse(null);
-			Villager gatheringTarget = gatheringSpeaker == null ? null : nearestConversationPartner(gatheringSpeaker, villagers);
-			if (gatheringTarget != null && villagers.size() >= 3 && playId(gatheringSpeaker, "ebfifz",
-					"gathering:" + player.getUUID(), LONG_COOLDOWN, gatheringTarget)) return;
-			for (int firstIndex = 0; firstIndex < villagers.size(); firstIndex++) {
-				Villager first = villagers.get(firstIndex);
-				Villager nearestPartner = nearestConversationPartner(first, villagers);
-				if (nearestPartner == null) continue;
-				for (int secondIndex = firstIndex + 1; secondIndex < villagers.size(); secondIndex++) {
-					Villager second = villagers.get(secondIndex);
-					String pair = orderedPair(first.getUUID(), second.getUUID());
-					if (second != nearestPartner || !checkedPairs.add(pair) || isBusy(first) || isBusy(second)) continue;
-					int togetherTicks = PAIR_TICKS.merge(pair, 100, Integer::sum);
-					if (togetherTicks < 200) continue;
-					boolean firstHasNose = data(first).vnap$hasNose();
-					boolean secondHasNose = data(second).vnap$hasNose();
-					if (!firstHasNose || !secondHasNose) {
-						boolean bothMissing = !firstHasNose && !secondHasNose;
-						Villager conversationSpeaker = !bothMissing && !firstHasNose ? second : first;
-						Villager conversationSubject = conversationSpeaker == first ? second : first;
-						List<List<String>> choices = bothMissing
-							? TWO_MISSING_NOSES_CONVERSATIONS : ONE_MISSING_NOSE_CONVERSATIONS;
-						List<String> sequence = choices.get(Math.floorMod(pair.hashCode() + (int) (ticks / LONG_COOLDOWN), choices.size()));
-						if (playId(conversationSpeaker, sequence.getFirst(), "nose_conversation:" + pair + ":" + sequence.getFirst(),
-								LONG_COOLDOWN, conversationSubject)) {
-							holdListener(conversationSubject, conversationSpeaker, DialogueCatalog.byId(sequence.getFirst()).durationTicks());
-							queueConversation(level, conversationSpeaker, conversationSubject, sequence);
-							PAIR_TICKS.put(pair, 0);
-						}
-						return;
-					}
-					CastProfile firstCast = cast(first);
-					CastProfile secondCast = cast(second);
-					String meetId = meetDialogue(firstCast == CastProfile.VILLAGER ? secondCast : firstCast);
-					if (meetId != null && (firstCast == CastProfile.VILLAGER || secondCast == CastProfile.VILLAGER)) {
-						Villager speaker = firstCast == CastProfile.VILLAGER ? first : second;
-						Villager subject = speaker == first ? second : first;
-						if (playId(speaker, meetId, "meet:" + pair, LONG_COOLDOWN, subject)) {
-							holdListener(subject, speaker, 80L);
-							PAIR_TICKS.put(pair, 0);
-						}
-						return;
-					}
-					boolean atCampfire = nearBlock(level, first.blockPosition(), "campfire", 4)
-						&& nearBlock(level, second.blockPosition(), "campfire", 4);
-					boolean negativeGossip = isNegativeReputation(first, player) || isNegativeReputation(second, player);
-					String conversation = atCampfire ? CAMPFIRE_CONVERSATION.getFirst()
-						: first.getVehicle() != null && first.getVehicle() == second.getVehicle()
-						? "zqfvby"
-						: negativeGossip && first.getDeltaMovement().horizontalDistanceSqr()
-							+ second.getDeltaMovement().horizontalDistanceSqr() < 0.0004
-							? (Math.floorMod(pair.hashCode() + (int) (ticks / LONG_COOLDOWN), 2) == 0 ? "wrjbdd" : GOSSIP_CONVERSATION.getFirst())
-							: wanderingConversation(pair).getFirst();
-					if (playId(first, conversation, "conversation:" + pair + ":" + conversation, LONG_COOLDOWN, second)) {
-						holdListener(second, first, DialogueCatalog.byId(conversation).durationTicks());
-						if (conversation.startsWith("gmrypk")) queueWanderingConversation(level, first, second, wanderingConversation(pair));
-						else if (atCampfire) queueConversation(level, first, second, CAMPFIRE_CONVERSATION);
-						else if (conversation.equals(GOSSIP_CONVERSATION.getFirst())) queueConversation(level, first, second, GOSSIP_CONVERSATION);
-						PAIR_TICKS.put(pair, 0);
-						return;
-					}
-				}
-			}
+		}
 
-			Villager adult = villagers.stream().findFirst().orElse(null);
-			List<Villager> babies = nearbyVillagers(level, player.position(), 24).stream()
-				.filter(villager -> villager.isBaby() && !villager.isSleeping()).toList();
-			Villager baby = babies.stream().findFirst().orElse(null);
-			if (babies.size() >= 2 && babies.get(0).distanceToSqr(babies.get(1)) <= 64.0
-					&& babies.get(0).getDeltaMovement().horizontalDistanceSqr() + babies.get(1).getDeltaMovement().horizontalDistanceSqr() > 0.01) {
-				playId(babies.get(0), "rfnirh", "baby_chase:" + orderedPair(babies.get(0).getUUID(), babies.get(1).getUUID()), LONG_COOLDOWN, babies.get(1));
-			}
-			if (adult != null && baby != null && adult.distanceToSqr(baby) <= 64.0) {
-				playSharedId(adult, "pbmrxx", "see_baby:" + adult.getUUID() + ":" + baby.getUUID(), LONG_COOLDOWN, baby);
-			}
+		Villager adult = villagers.stream().findFirst().orElse(null);
+		List<Villager> babies = nearbyVillagers(level, player.position(), 24).stream()
+			.filter(villager -> villager.isBaby() && !villager.isSleeping()).toList();
+		Villager baby = babies.stream().findFirst().orElse(null);
+		if (babies.size() >= 2 && babies.get(0).distanceToSqr(babies.get(1)) <= 64.0
+				&& babies.get(0).getDeltaMovement().horizontalDistanceSqr() + babies.get(1).getDeltaMovement().horizontalDistanceSqr() > 0.01) {
+			playId(babies.get(0), "rfnirh", "baby_chase:" + orderedPair(babies.get(0).getUUID(), babies.get(1).getUUID()), LONG_COOLDOWN, babies.get(1));
+		}
+		if (adult != null && baby != null && adult.distanceToSqr(baby) <= 64.0) {
+			playSharedId(adult, "pbmrxx", "see_baby:" + adult.getUUID() + ":" + baby.getUUID(), LONG_COOLDOWN, baby);
 		}
 	}
 
@@ -1130,17 +985,13 @@ public final class ContextualDialogueController {
 		return WANDERING_CONVERSATIONS.get(Math.floorMod(pair.hashCode() + (int) (ticks / LONG_COOLDOWN), WANDERING_CONVERSATIONS.size()));
 	}
 
-	private static void queueWanderingConversation(ServerLevel level, Villager first, Villager second, List<String> sequence) {
-		queueConversation(level, first, second, sequence);
-	}
-
-	private static void queueConversation(ServerLevel level, Villager first, Villager second, List<String> sequence) {
+	private static void queueConversation(Villager first, Villager second, List<String> sequence) {
 		long due = ticks + DialogueCatalog.byId(sequence.getFirst()).durationTicks() + 2L;
 		for (int index = 1; index < sequence.size(); index++) {
 			Villager speaker = index % 2 == 1 ? second : first;
 			Villager target = speaker == first ? second : first;
 			String id = sequence.get(index);
-			PENDING_SPEECH.add(new PendingSpeech(level, speaker.getUUID(), id, target.getUUID(), due));
+			PENDING_SPEECH.add(new PendingSpeech(speaker.getUUID(), id, target.getUUID(), due, false));
 			due += DialogueCatalog.byId(id).durationTicks() + 2L;
 		}
 	}
@@ -1153,7 +1004,7 @@ public final class ContextualDialogueController {
 			.orElse(null);
 	}
 
-	private static boolean nearBlock(ServerLevel level, BlockPos origin, String pathPart, int range) {
+	private static boolean nearBlock(Level level, BlockPos origin, String pathPart, int range) {
 		for (int x = -range; x <= range; x++) for (int y = -2; y <= 2; y++) for (int z = -range; z <= range; z++) {
 			String path = BuiltInRegistries.BLOCK.getKey(level.getBlockState(origin.offset(x, y, z)).getBlock()).getPath();
 			if (path.contains(pathPart)) return true;
@@ -1161,7 +1012,7 @@ public final class ContextualDialogueController {
 		return false;
 	}
 
-	private static boolean playHomeChestReaction(ServerLevel level, Player player, BlockPos chestPos) {
+	private static boolean playHomeChestReaction(Level level, Player player, BlockPos chestPos) {
 		boolean bedNearby = nearBlock(level, chestPos, "bed", 6);
 		return nearbyVillagers(level, Vec3.atCenterOf(chestPos), OBSERVER_RANGE).stream()
 			.filter(villager -> !villager.isBaby() && !villager.isSleeping() && cast(villager) == CastProfile.VILLAGER)
@@ -1177,7 +1028,7 @@ public final class ContextualDialogueController {
 			.map(home -> home.isCloseEnough(villager.level().dimension(), pos, range)).orElse(false);
 	}
 
-	private static void playFireworkReactions(ServerLevel level, Entity firework) {
+	private static void playFireworkReactions(Level level, Entity firework) {
 		List<Villager> witnesses = nearbyVillagers(level, firework.position(), OBSERVER_RANGE).stream()
 			.filter(villager -> !villager.isSleeping())
 			.filter(villager -> villager.hasLineOfSight(firework)).toList();
@@ -1189,7 +1040,7 @@ public final class ContextualDialogueController {
 			.ifPresent(villager -> playId(villager, "zeykfp", "firework_seen:" + villager.getUUID(), SHORT_COOLDOWN, firework));
 	}
 
-	private static void playLightningReaction(ServerLevel level, Entity lightning) {
+	private static void playLightningReaction(Level level, Entity lightning) {
 		nearbyVillagers(level, lightning.position(), 128.0).stream()
 			.filter(villager -> !villager.isBaby() && !villager.isSleeping() && villager.hasLineOfSight(lightning))
 			.min(Comparator.comparingDouble(villager -> villager.distanceToSqr(lightning)))
@@ -1197,7 +1048,6 @@ public final class ContextualDialogueController {
 	}
 
 	private static void processVillagerState(Villager villager) {
-		ensureSpecialTrade(villager);
 		VillagerSnapshot previous = VILLAGER_STATES.get(villager.getUUID());
 		BlockPos workstation = findWorkstation(villager);
 		VillagerSnapshot current = snapshot(villager, workstation != null);
@@ -1219,13 +1069,13 @@ public final class ContextualDialogueController {
 			boolean armor = path.endsWith("_helmet") || path.endsWith("_chestplate") || path.endsWith("_leggings") || path.endsWith("_boots");
 			String id = armor ? (pickedUp.isEnchanted() ? "habfnx" : "zjwpzi") : "dxmmiu";
 			boolean food = path.equals("beetroot") || path.equals("bread") || path.equals("carrot") || path.equals("potato");
-			Villager donor = villager.level() instanceof ServerLevel level ? nearbyVillagers(level, villager.position(), 4.0).stream()
-				.filter(other -> other != villager).min(Comparator.comparingDouble(other -> other.distanceToSqr(villager))).orElse(null) : null;
-			ServerPlayer nearbyPlayer = villager.level() instanceof ServerLevel level ? nearestPlayer(level, villager.position(), 6.0) : null;
+			Villager donor = nearbyVillagers(villager.level(), villager.position(), 4.0).stream()
+				.filter(other -> other != villager).min(Comparator.comparingDouble(other -> other.distanceToSqr(villager))).orElse(null);
+			Player nearbyPlayer = villager.level().getNearestPlayer(villager, 6.0);
 			if (villager.isBaby() && donor != null && food
 					&& playId(donor, "locuih", "share_food:" + donor.getUUID(), SHORT_COOLDOWN, villager)) {
 				long due = ticks + DialogueCatalog.byId("locuih").durationTicks() + 2L;
-				PENDING_SPEECH.add(new PendingSpeech((ServerLevel) villager.level(), villager.getUUID(), "saxuwk", donor.getUUID(), due));
+				PENDING_SPEECH.add(new PendingSpeech(villager.getUUID(), "saxuwk", donor.getUUID(), due, false));
 			} else if (donor != null && !armor) {
 				playId(villager, "ujyxfg", "pickup_villager:" + villager.getUUID() + ":" + path, SHORT_COOLDOWN, donor);
 			} else if (nearbyPlayer != null) {
@@ -1281,15 +1131,14 @@ public final class ContextualDialogueController {
 		if (profession(villager).equals("farmer") && nearCrops(villager.level(), villager.blockPosition(), 4)) {
 			playId(villager, "aobqjt", "farming:" + villager.getUUID(), LONG_COOLDOWN);
 		}
-		if (!villager.isSleeping() && villager.getDeltaMovement().horizontalDistanceSqr() > 0.0004
-				&& villager.level() instanceof ServerLevel level) {
-			if (!data(villager).vnap$hasNose()) {
+		if (!villager.isSleeping() && villager.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
+			if (!VillagerCosmetics.hasNose(villager.getUUID())) {
 				playId(villager, "dcvgnm", "no_nose_wander:" + villager.getUUID(), LONG_COOLDOWN);
 			}
-			float sunAngle = level.environmentAttributes().getValue(EnvironmentAttributes.SUN_ANGLE, villager.blockPosition());
+			float sunAngle = villager.level().environmentAttributes().getValue(EnvironmentAttributes.SUN_ANGLE, villager.blockPosition());
 			if (sunAngle >= 0.5F && sunAngle < 0.85F) {
-				String id = level.dimension() == Level.END ? "iubjul" : level.dimension() == Level.NETHER ? "bvtmmz"
-					: level.dimension() != Level.OVERWORLD ? "uhbigm"
+				String id = villager.level().dimension() == Level.END ? "iubjul" : villager.level().dimension() == Level.NETHER ? "bvtmmz"
+					: villager.level().dimension() != Level.OVERWORLD ? "uhbigm"
 					: villager.getBrain().hasMemoryValue(MemoryModuleType.HOME) ? "wkfbuv" : "uqguqj";
 				playId(villager, id, "return_home:" + villager.getUUID() + ":" + id, LONG_COOLDOWN);
 			}
@@ -1390,7 +1239,7 @@ public final class ContextualDialogueController {
 		};
 	}
 
-	private static boolean playNearbyEntityContext(ServerLevel level, Villager speaker) {
+	private static boolean playNearbyEntityContext(Level level, Villager speaker) {
 		AABB area = speaker.getBoundingBox().inflate(NEARBY_SUBJECT_RANGE, 6.0, NEARBY_SUBJECT_RANGE);
 		List<Entity> visibleEntities = level.getEntities(speaker, area, Entity::isAlive).stream()
 			.filter(entity -> speaker.distanceToSqr(entity) <= NEARBY_SUBJECT_RANGE * NEARBY_SUBJECT_RANGE)
@@ -1429,13 +1278,6 @@ public final class ContextualDialogueController {
 				if (dialogue == null && entity instanceof net.minecraft.world.entity.TamableAnimal tame && tame.isTame()) {
 					dialogue = entity.isBaby() ? "sxikgq" : "aqxgxh";
 				}
-				if (dialogue == null && entity instanceof Mob mob && mob.getTarget() != null) {
-					if (path.equals("bee")) dialogue = "bmimxe";
-					else if (path.equals("iron_golem") && mob.getTarget() instanceof Player player) {
-						dialogue = "qffeco";
-						target = player;
-					}
-				}
 				if (dialogue == null && (entity.isPassenger() || !entity.getPassengers().isEmpty())) dialogue = "dxeaal";
 				if (dialogue == null && entity.isBaby()) dialogue = BABY_ENTITY_DIALOGUES.get(path);
 				if (dialogue == null) dialogue = NEARBY_ENTITY_DIALOGUES.get(path);
@@ -1447,59 +1289,93 @@ public final class ContextualDialogueController {
 			});
 	}
 
-	private static void onDamage(LivingEntity entity, net.minecraft.world.damagesource.DamageSource source,
-			float baseDamageTaken, float damageTaken, boolean blocked) {
-		if (entity.entityTags().contains(DIALOGUE_TEST_TAG)) return;
-		if (blocked || damageTaken <= 0.0F) return;
-		playIronGolemAttackWitness(entity, source);
-		playHurtWitness(entity);
+	// ---------------------------------------------------------------- damage / death (per-tick polling)
+
+	private static void processDamageAndDeath(ClientLevel level) {
+		List<AbstractClientPlayer> observers = observablePlayers(level);
+		if (observers.isEmpty()) return;
+		AABB area = null;
+		for (Player observer : observers) {
+			AABB observerArea = AABB.ofSize(observer.position(), OBSERVER_RANGE * 3.0, OBSERVER_RANGE * 2.0, OBSERVER_RANGE * 3.0);
+			area = area == null ? observerArea : area.minmax(observerArea);
+		}
+		List<LivingEntity> tracked = level.getEntitiesOfClass(LivingEntity.class, area, entity ->
+			entity instanceof Villager || entity instanceof WanderingTrader || entity instanceof Sheep sheep && isWooly(sheep)
+				|| entity instanceof Player);
+		Set<UUID> present = new HashSet<>();
+		for (LivingEntity entity : tracked) {
+			present.add(entity.getUUID());
+			Float previousHealth = HEALTH_SNAPSHOT.get(entity.getUUID());
+			float health = entity.getHealth();
+			HEALTH_SNAPSHOT.put(entity.getUUID(), health);
+			if (previousHealth == null) continue;
+			if (health <= 0.0F && previousHealth > 0.0F) {
+				onDeath(entity);
+			} else if (health < previousHealth) {
+				onDamage(entity, level);
+			}
+		}
+		HEALTH_SNAPSHOT.keySet().retainAll(present);
+	}
+
+	private static void onDamage(LivingEntity entity, Level level) {
+		playIronGolemAttackWitness(entity, level);
+		playHurtWitness(entity, level);
 		if (hasDamageLock(entity)) return;
 		if (entity instanceof Sheep sheep && isWooly(sheep)) {
-			Entity attacker = source.getEntity();
+			Entity attacker = nearestAttacker(sheep, level);
 			String id = attacker instanceof Player ? "ncyeaw" : "eyiraw";
-			playDamageDialogue(sheep, id, "hurt:" + sheep.getUUID(), source, attacker);
+			playDamageDialogue(sheep, id, "hurt:" + sheep.getUUID(), attacker);
 			return;
 		}
 		if (entity instanceof WanderingTrader trader) {
-			Entity attacker = source.getEntity();
+			Entity attacker = nearestAttacker(trader, level);
 			String id = attacker instanceof Player ? "vevdkl" : "wyvzhk";
-			playDamageDialogue(trader, id, "hurt:" + trader.getUUID(), source, attacker);
+			playDamageDialogue(trader, id, "hurt:" + trader.getUUID(), attacker);
 			return;
 		}
 		if (!(entity instanceof Villager villager)) return;
 		LAST_DANGER.put(villager.getUUID(), ticks);
+		Entity attacker = nearestAttacker(villager, level);
 		if (villager.isBaby()) {
-			String id = source.getEntity() instanceof Player player && source.getDirectEntity() == player ? "ahcvzd" : "ecslqo";
-			playDamageDialogue(villager, id, "hurt:" + villager.getUUID(), source, source.getEntity());
+			String id = attacker instanceof Player ? "ahcvzd" : "ecslqo";
+			playDamageDialogue(villager, id, "hurt:" + villager.getUUID(), attacker);
 			return;
 		}
 		CastProfile profile = cast(villager);
 		if (profile != CastProfile.VILLAGER) {
-			String id = source.getEntity() instanceof Player
-				? profile.attack : profile.hurt;
-			playDamageDialogue(villager, id, "hurt:" + villager.getUUID(), source, source.getEntity());
+			String id = attacker instanceof Player ? profile.attack : profile.hurt;
+			playDamageDialogue(villager, id, "hurt:" + villager.getUUID(), attacker);
 			return;
 		}
-		if (source.getEntity() instanceof Player player && homeMatches(villager, villager.blockPosition(), 4)) {
+		if (attacker instanceof Player player && homeMatches(villager, villager.blockPosition(), 4)) {
 			if (isPlaying(villager, "lpuocy") || isPlaying(villager, "slbqfwbayahw")) return;
 			interrupt(villager);
 			playHomeAttackReaction(villager, player);
 			return;
 		}
-		String dialogue = damageDialogue(source);
-		if (playDamageDialogue(villager, dialogue, "hurt:" + villager.getUUID() + ":" + dialogue, source, source.getEntity())
-				&& ready("panic:" + villager.getUUID(), SHORT_COOLDOWN) && villager.level() instanceof ServerLevel level) {
-			COOLDOWNS.put("panic:" + villager.getUUID(), ticks);
-			PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), "uzdxum",
-				source.getEntity() == null ? null : source.getEntity().getUUID(), ticks + DialogueCatalog.byId(dialogue).durationTicks() + 2L));
-		}
+		bumpReputation(villager.getUUID(), attacker instanceof Player ? -15 : 0);
+		String dialogue = damageDialogue(villager, level, attacker);
+		playDamageDialogue(villager, dialogue, "hurt:" + villager.getUUID() + ":" + dialogue, attacker);
 	}
 
-	private static boolean playDamageDialogue(LivingEntity speaker, String id, String cooldownKey,
-			net.minecraft.world.damagesource.DamageSource source, Entity target) {
+	/** No synced {@code DamageSource} on the client; approximate the attacker from nearby state. */
+	private static Entity nearestAttacker(LivingEntity victim, Level level) {
+		if (level instanceof ClientLevel clientLevel) {
+			Player nearestCandidate = observablePlayers(clientLevel).stream()
+				.filter(candidate -> candidate != victim && candidate.distanceToSqr(victim) <= 16.0 && candidate.hasLineOfSight(victim))
+				.min(Comparator.comparingDouble((Player candidate) -> candidate.distanceToSqr(victim)).thenComparing(Player::getUUID))
+				.orElse(null);
+			if (nearestCandidate != null) return nearestCandidate;
+		}
+		return level.getEntitiesOfClass(LivingEntity.class, victim.getBoundingBox().inflate(3.0),
+				candidate -> candidate != victim && candidate instanceof net.minecraft.world.entity.monster.Monster)
+			.stream().min(Comparator.comparingDouble(candidate -> candidate.distanceToSqr(victim))).map(Entity.class::cast).orElse(null);
+	}
+
+	private static boolean playDamageDialogue(LivingEntity speaker, String id, String cooldownKey, Entity target) {
 		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(id);
-		long cooldown = source.getEntity() == null ? SHORT_COOLDOWN
-			: group == null ? 20L : group.durationTicks() + 20L;
+		long cooldown = target == null ? SHORT_COOLDOWN : group == null ? 20L : group.durationTicks() + 20L;
 		if (isPlaying(speaker, id) || !ready(cooldownKey, cooldown)) return false;
 		interrupt(speaker);
 		boolean sharedAdult = speaker instanceof WanderingTrader || speaker instanceof Villager villager
@@ -1508,8 +1384,7 @@ public final class ContextualDialogueController {
 			: playId(speaker, id, cooldownKey, cooldown, target);
 	}
 
-	private static void playHurtWitness(LivingEntity entity) {
-		if (!(entity.level() instanceof ServerLevel level)) return;
+	private static void playHurtWitness(LivingEntity entity, Level level) {
 		nearbyVillagers(level, entity.position(), OBSERVER_RANGE).stream()
 			.filter(witness -> witness != entity && !witness.isBaby() && !witness.isSleeping()
 				&& !isBusy(witness) && witness.hasLineOfSight(entity))
@@ -1517,17 +1392,19 @@ public final class ContextualDialogueController {
 			.ifPresent(witness -> playSharedId(witness, "pkvhpv", "witness_hurt:" + witness.getUUID(), SHORT_COOLDOWN, entity));
 	}
 
-	private static void playIronGolemAttackWitness(LivingEntity entity,
-			net.minecraft.world.damagesource.DamageSource source) {
-		if (!(entity.level() instanceof ServerLevel level)) return;
-		ServerPlayer player = null;
+	private static void playIronGolemAttackWitness(LivingEntity entity, Level level) {
 		String hurtType = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath();
-		Entity attacker = source.getEntity();
-		String attackerType = attacker == null ? "" : BuiltInRegistries.ENTITY_TYPE.getKey(attacker.getType()).getPath();
-		if (hurtType.equals("iron_golem") && attacker instanceof ServerPlayer serverPlayer) player = serverPlayer;
-		else if (entity instanceof ServerPlayer serverPlayer && attackerType.equals("iron_golem")) player = serverPlayer;
+		Player player = null;
+		if (hurtType.equals("iron_golem")) {
+			Entity attacker = nearestAttacker(entity, level);
+			if (attacker instanceof Player candidate) player = candidate;
+		} else if (entity instanceof Player candidate) {
+			boolean nearGolem = level.getEntitiesOfClass(LivingEntity.class, entity.getBoundingBox().inflate(3.0),
+				living -> BuiltInRegistries.ENTITY_TYPE.getKey(living.getType()).getPath().equals("iron_golem")).size() > 0;
+			if (nearGolem) player = candidate;
+		}
 		if (player == null || player.isCreative()) return;
-		ServerPlayer subject = player;
+		Player subject = player;
 		nearbyVillagers(level, entity.position(), OBSERVER_RANGE).stream()
 			.filter(witness -> !witness.isBaby() && !witness.isSleeping() && !isBusy(witness)
 				&& witness.hasLineOfSight(subject))
@@ -1536,43 +1413,29 @@ public final class ContextualDialogueController {
 				SHORT_COOLDOWN, subject));
 	}
 
-	private static String damageDialogue(net.minecraft.world.damagesource.DamageSource source) {
-		String attacker = source.getEntity() == null ? "" : BuiltInRegistries.ENTITY_TYPE.getKey(source.getEntity().getType()).getPath();
-		String direct = source.getDirectEntity() == null ? "" : BuiltInRegistries.ENTITY_TYPE.getKey(source.getDirectEntity().getType()).getPath();
-		String damage = source.getMsgId().toLowerCase(Locale.ROOT);
-		if (direct.equals("arrow")) return "huhcbd";
-		if (direct.equals("snowball")) return "dlrxes";
-		if (direct.equals("falling_block")) return "yzqpvi";
-		if (direct.equals("firework_rocket")) return "gesjov";
-		if (direct.equals("potion") || direct.equals("lingering_potion")) return damage.contains("magic") ? "gacgtq" : "hmadgp";
-		if (source.getEntity() instanceof Player player && source.getDirectEntity() == player) {
-			return weaponAttackDialogue(player.getMainHandItem());
+	private static String damageDialogue(LivingEntity victim, Level level, Entity attacker) {
+		if (victim.isOnFire()) return "etkxko";
+		if (victim.isInLava()) return "elryje";
+		if (victim.getTicksFrozen() > 0) return "igebly";
+		if (attacker instanceof Player player) return weaponAttackDialogue(player.getMainHandItem());
+		if (attacker != null) {
+			String attackerType = BuiltInRegistries.ENTITY_TYPE.getKey(attacker.getType()).getPath();
+			if (attackerType.equals("evoker")) return "nkcoqb";
+			if (attackerType.equals("pillager")) return "qhpyaw";
+			if (attackerType.equals("ravager")) return "uveohs";
+			if (attackerType.equals("vex")) return "caykki";
+			if (attackerType.equals("vindicator")) return "swomdw";
+			if (attackerType.equals("witch")) return "rtikom";
+			if (attackerType.equals("zoglin")) return "hfmwvf";
+			if (attackerType.contains("zombie") || attackerType.equals("drowned") || attackerType.equals("husk")) return "mytmrk";
 		}
-		if (attacker.equals("evoker")) return "nkcoqb";
-		if (attacker.equals("pillager")) return "qhpyaw";
-		if (attacker.equals("ravager")) return "uveohs";
-		if (attacker.equals("vex")) return "caykki";
-		if (attacker.equals("vindicator")) return "swomdw";
-		if (attacker.equals("witch")) return "rtikom";
-		if (attacker.equals("zoglin")) return "hfmwvf";
-		if (attacker.contains("zombie") || attacker.equals("drowned") || attacker.equals("husk")) return "mytmrk";
-		if (damage.contains("lightning")) return "ikrwzy";
-		if (damage.contains("explosion")) return "fcbygh";
-		if (damage.contains("fire")) return "etkxko";
-		if (damage.contains("lava")) return "elryje";
-		if (damage.contains("cactus")) return "rogpvp";
-		if (damage.contains("freeze")) return "igebly";
-		if (damage.contains("wall")) return "vnaodx";
-		if (damage.contains("stalagmite")) return "nsxmkr";
-		if (damage.contains("fall")) return "cifbit";
+		if (victim.fallDistance > 3.0F) return "cifbit";
 		return "wyvzhk";
 	}
 
-	private static void onDeath(LivingEntity entity, net.minecraft.world.damagesource.DamageSource source) {
-		if (entity.entityTags().contains(DIALOGUE_TEST_TAG)) return;
+	private static void onDeath(LivingEntity entity) {
 		interrupt(entity);
-		if (!(entity.level() instanceof ServerLevel level)) return;
-		if (entity.entityTags().contains(NATURAL_SPECIAL_TAG)) clearNaturalSpecial(level, entity);
+		Level level = entity.level();
 		if (entity instanceof Villager villager) {
 			BUSY_UNTIL.remove(villager.getUUID());
 			if (villager.isBaby()) playId(villager, "ecslqo", "death:" + villager.getUUID(), 1L);
@@ -1584,219 +1447,47 @@ public final class ContextualDialogueController {
 				.filter(witness -> witness != entity && !witness.isBaby() && !witness.isSleeping())
 				.min(Comparator.comparingDouble(witness -> witness.distanceToSqr(entity)))
 				.ifPresent(witness -> playSharedId(witness, "pmqrpb", "witness_death:" + witness.getUUID(), SHORT_COOLDOWN, entity));
-		} else if (entity instanceof ServerPlayer player) {
-			int deaths = PLAYER_DEATHS.merge(player.getUUID(), 1, Integer::sum);
-			String id = level.getLevelData().isHardcore() ? "elcjbb" : deaths > 1 ? "dxcjqn" : "hzjycq";
+		} else if (entity instanceof Player player) {
+			String id = level.getLevelData().isHardcore() ? "elcjbb" : "hzjycq";
 			nearbyVillagers(level, player.position(), OBSERVER_RANGE).stream()
 				.filter(witness -> !witness.isBaby() && !witness.isSleeping() && witness.hasLineOfSight(player))
 				.min(Comparator.comparingDouble(witness -> witness.distanceToSqr(player)))
-				.ifPresent(witness -> playSharedId(witness, id, "player_death:" + witness.getUUID() + ":" + deaths, SHORT_COOLDOWN, player));
+				.ifPresent(witness -> playSharedId(witness, id, "player_death:" + witness.getUUID(), SHORT_COOLDOWN, player));
 		}
 	}
 
+	// ---------------------------------------------------------------- interaction
+
 	private static InteractionResult onUseEntity(Player player, Entity entity, InteractionHand hand) {
-		if (entity.entityTags().contains(DIALOGUE_TEST_TAG)) return InteractionResult.SUCCESS;
 		if (entity instanceof Villager villager) {
-			if (cast(villager) == CastProfile.UNREACHABLE) {
-				repelPlayer(villager, player);
-				return InteractionResult.SUCCESS;
-			}
 			ItemStack heldStack = player.getItemInHand(hand);
 			String heldItem = BuiltInRegistries.ITEM.getKey(heldStack.getItem()).getPath();
-			InteractionResult cosmeticResult = interactWithCosmetic(player, villager, heldStack);
-			if (cosmeticResult != InteractionResult.PASS) return cosmeticResult;
 			String gift = foodGiftDialogue(villager.isBaby(), heldItem);
 			if (gift != null) {
 				playId(villager, gift, "food_gift:" + villager.getUUID() + ":" + heldItem, SHORT_COOLDOWN, player);
+				bumpReputation(villager.getUUID(), 2);
 				return InteractionResult.PASS;
 			}
-			int offeredSign = signType(heldStack);
-			if (offeredSign >= 0 && !villager.isBaby()) {
-				VillagerNewsData state = data(villager);
-				int previousSign = state.vnap$signType();
-				if (previousSign == offeredSign) return InteractionResult.SUCCESS;
-				if (previousSign >= 0) villager.spawnAtLocation((ServerLevel) villager.level(), signItem(previousSign));
-				state.vnap$setSignType(offeredSign);
-				consume(player, heldStack);
-				villager.level().playSound(null, villager.blockPosition(), SoundEvents.HORSE_STEP_WOOD, SoundSource.NEUTRAL, 1.0F, 1.0F);
-				if (previousSign < 0) {
-					state.vnap$setSignMessage(villager.getRandom().nextInt(87));
-					playId(villager, "vqlrqf", "sign_gift:" + villager.getUUID(), SHORT_COOLDOWN, player);
-				}
-				return InteractionResult.SUCCESS;
-			}
 			if (villager.isSleeping()) {
-				INTERRUPTED_SLEEP.add(villager.getUUID());
-				villager.stopSleeping();
 				playId(villager, "viwaal", "wake_interact:" + villager.getUUID(), SHORT_COOLDOWN, player);
 				return InteractionResult.PASS;
 			}
-			ensureSpecialTrade(villager);
-			if (!villager.isBaby() && hand == InteractionHand.MAIN_HAND && player.level() instanceof ServerLevel level) {
-				ACTIVE_TRADES.put(player.getUUID(), new TradeSession(level, villager.getUUID(), ticks));
+			if (!villager.isBaby() && hand == InteractionHand.MAIN_HAND) {
+				activeTrade = new TradeSession(villager.getUUID(), ticks);
 			}
 			if (villager.isBaby()) playId(villager, "aezdiy", "baby_trade:" + villager.getUUID(), SHORT_COOLDOWN, player);
 		} else if (entity instanceof WanderingTrader trader) {
-			if (hand == InteractionHand.MAIN_HAND && player.level() instanceof ServerLevel level) {
-				ACTIVE_TRADES.put(player.getUUID(), new TradeSession(level, trader.getUUID(), ticks));
-			}
+			if (hand == InteractionHand.MAIN_HAND) activeTrade = new TradeSession(trader.getUUID(), ticks);
 		} else if (entity instanceof Sheep sheep && isWooly(sheep)) {
 			String held = BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath();
 			playId(sheep, held.equals("shears") ? "jqaekk" : "fskcce", "interact:" + sheep.getUUID(), SHORT_COOLDOWN, player);
-		} else if (BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().equals("lead")
-				&& player.level() instanceof ServerLevel level) {
-			playObserved(level, player, entity.position(), "Use a Lead", SHORT_COOLDOWN);
+		} else if (BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().equals("lead")) {
+			playObserved(player.level(), player, entity.position(), "Use a Lead", SHORT_COOLDOWN);
 		}
-		if (entity instanceof Sheep && BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().equals("shears")
-				&& player.level() instanceof ServerLevel level) {
-			playObserved(level, player, entity.position(), "Shear a Sheep", SHORT_COOLDOWN);
+		if (entity instanceof Sheep && BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).getPath().equals("shears")) {
+			playObserved(player.level(), player, entity.position(), "Shear a Sheep", SHORT_COOLDOWN);
 		}
 		return InteractionResult.PASS;
-	}
-
-	private static InteractionResult interactWithCosmetic(Player player, Villager villager, ItemStack stack) {
-		VillagerNewsData state = data(villager);
-		if (stack.getItem() == Items.SHEARS && state.vnap$signType() >= 0) {
-			if (villager.level() instanceof ServerLevel level) {
-				villager.spawnAtLocation(level, signItem(state.vnap$signType()));
-				level.playSound(null, villager.blockPosition(), SoundEvents.SHEEP_SHEAR, SoundSource.NEUTRAL, 1.0F, 1.0F);
-			}
-			state.vnap$setSignMessage(-1);
-			state.vnap$setSignType(-1);
-			damageShears(player, stack);
-			return InteractionResult.SUCCESS;
-		}
-		if (isAxe(stack) && state.vnap$signType() >= 0) {
-			int direction = player.isShiftKeyDown() ? -1 : 1;
-			int message = Math.floorMod(state.vnap$signMessage() + direction, 87);
-			state.vnap$setSignMessage(message);
-			if (villager.level() instanceof ServerLevel level) {
-				level.playSound(null, villager.blockPosition(), SoundEvents.HORSE_STEP_WOOD, SoundSource.NEUTRAL, 1.0F, 1.0F);
-			}
-			if (player instanceof ServerPlayer serverPlayer) {
-				serverPlayer.sendOverlayMessage(Component.literal("Sign message " + (message + 1) + " / 87"));
-			}
-			return InteractionResult.SUCCESS;
-		}
-		if (stack.getItem() == Items.SHEARS && !villager.isBaby()) {
-			if (state.vnap$cosmetic() != 0) {
-				if (villager.level() instanceof ServerLevel level) {
-					net.minecraft.world.item.Item item = VillagerNewsItems.cosmeticItem(state.vnap$cosmetic());
-					if (item != null) villager.spawnAtLocation(level, new ItemStack(item));
-					level.playSound(null, villager.blockPosition(), SoundEvents.SHEEP_SHEAR, SoundSource.NEUTRAL, 1.0F, 1.0F);
-				}
-				state.vnap$setCosmetic(0);
-				damageShears(player, stack);
-				playId(villager, "ckjbyd", "remove_cosmetic:" + villager.getUUID(), 1L, player);
-				return InteractionResult.SUCCESS;
-			}
-			if (state.vnap$hasNose()) {
-				if (villager.level() instanceof ServerLevel level) {
-					villager.spawnAtLocation(level, new ItemStack(VillagerNewsItems.VILLAGER_NOSE));
-					level.playSound(null, villager.blockPosition(), SoundEvents.SHEEP_SHEAR, SoundSource.NEUTRAL, 1.0F, 1.0F);
-				}
-				state.vnap$setHasNose(false);
-				damageShears(player, stack);
-				playId(villager, "jktrnd", "shear_nose:" + villager.getUUID(), 1L, player);
-				return InteractionResult.SUCCESS;
-			}
-		}
-		if (stack.getItem() == VillagerNewsItems.VILLAGER_NOSE) {
-			if (state.vnap$hasNose()) {
-				playId(villager, "akfekx", "second_nose:" + villager.getUUID(), SHORT_COOLDOWN, player);
-				return InteractionResult.SUCCESS;
-			}
-			consume(player, stack);
-			state.vnap$setHasNose(true);
-			playId(villager, "kxrhxt", "return_nose:" + villager.getUUID(), 1L, player);
-			return InteractionResult.SUCCESS;
-		}
-		int cosmetic = VillagerNewsItems.cosmetic(stack.getItem());
-		if (cosmetic == 0) return InteractionResult.PASS;
-		if (state.vnap$cosmetic() != 0) return InteractionResult.SUCCESS;
-		consume(player, stack);
-		state.vnap$setCosmetic(cosmetic);
-		playGivenCosmetic(villager, player, cosmetic);
-		return InteractionResult.SUCCESS;
-	}
-
-	private static void playGivenCosmetic(Villager villager, Player player, int cosmetic) {
-		String id;
-		if (villager.isBaby()) {
-			id = switch (cosmetic) {
-				case 1 -> "svdjdk";
-				case 2 -> "cxeziv";
-				case 3 -> "riezum";
-				case 4 -> "rlkdqd";
-				default -> "orogba";
-			};
-		} else {
-			String special = switch (cosmetic) {
-				case 2 -> "wurmgu";
-				case 3 -> "inirxg";
-				case 4 -> "ozxzla";
-				default -> null;
-			};
-			id = special != null && (cosmetic == 3 || ThreadLocalRandom.current().nextInt(3) != 0)
-				? special : "orogba";
-		}
-		playId(villager, id, "give_cosmetic:" + villager.getUUID() + ":" + cosmetic, 1L, player);
-	}
-
-	private static void damageShears(Player player, ItemStack stack) {
-		if (!player.isCreative() && player instanceof ServerPlayer serverPlayer) {
-			stack.hurtAndBreak(1, serverPlayer.level(), serverPlayer, ignored -> {
-			});
-		}
-	}
-
-	private static void consume(Player player, ItemStack stack) {
-		if (!player.isCreative()) stack.shrink(1);
-	}
-
-	private static boolean isStandingSign(ItemStack stack) {
-		String path = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
-		return path.endsWith("_sign") && !path.endsWith("_hanging_sign");
-	}
-
-	public static int signType(ItemStack stack) {
-		if (!isStandingSign(stack)) return -1;
-		return switch (BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath()) {
-			case "oak_sign" -> 0;
-			case "spruce_sign" -> 1;
-			case "birch_sign" -> 2;
-			case "jungle_sign" -> 3;
-			case "acacia_sign" -> 4;
-			case "dark_oak_sign" -> 5;
-			case "mangrove_sign" -> 6;
-			case "cherry_sign" -> 7;
-			case "pale_oak_sign" -> 8;
-			case "bamboo_sign" -> 9;
-			case "crimson_sign" -> 10;
-			case "warped_sign" -> 11;
-			default -> -1;
-		};
-	}
-
-	public static ItemStack signItem(int type) {
-		return new ItemStack(switch (type) {
-			case 1 -> Items.SPRUCE_SIGN;
-			case 2 -> Items.BIRCH_SIGN;
-			case 3 -> Items.JUNGLE_SIGN;
-			case 4 -> Items.ACACIA_SIGN;
-			case 5 -> Items.DARK_OAK_SIGN;
-			case 6 -> Items.MANGROVE_SIGN;
-			case 7 -> Items.CHERRY_SIGN;
-			case 8 -> Items.PALE_OAK_SIGN;
-			case 9 -> Items.BAMBOO_SIGN;
-			case 10 -> Items.CRIMSON_SIGN;
-			case 11 -> Items.WARPED_SIGN;
-			default -> Items.OAK_SIGN;
-		});
-	}
-
-	private static boolean isAxe(ItemStack stack) {
-		return BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().endsWith("_axe");
 	}
 
 	private static String foodGiftDialogue(boolean baby, String item) {
@@ -1818,19 +1509,20 @@ public final class ContextualDialogueController {
 	}
 
 	private static void onAttackEntity(Player player, Entity entity) {
-		if (!(entity instanceof Villager villager) || !villager.isSleeping()) return;
-		INTERRUPTED_SLEEP.add(villager.getUUID());
-		villager.stopSleeping();
+		if (entity instanceof Villager villager) {
+			bumpReputation(villager.getUUID(), -25);
+			if (villager.isSleeping()) return;
+		}
 	}
 
 	private static void playHomeAttackReaction(Villager villager, Player player) {
-		if (!(villager.level() instanceof ServerLevel level)) return;
+		Level level = villager.level();
 		Villager witness = nearbyVillagers(level, villager.position(), 10.0).stream()
 			.filter(other -> other != villager && !other.isBaby() && !other.isSleeping() && other.hasLineOfSight(villager))
 			.min(Comparator.comparingDouble(other -> other.distanceToSqr(villager))).orElse(null);
 		if (witness != null && playSharedId(witness, "slbqfwswxeva", "home_witness:" + witness.getUUID(), 20L, villager)) {
 			long due = ticks + DialogueCatalog.byId("slbqfwswxeva").durationTicks() + 2L;
-			PENDING_SPEECH.add(new PendingSpeech(level, villager.getUUID(), "slbqfwbayahw", witness.getUUID(), due));
+			PENDING_SPEECH.add(new PendingSpeech(villager.getUUID(), "slbqfwbayahw", witness.getUUID(), due, false));
 		} else playId(villager, "lpuocy", "attacked_home:" + villager.getUUID(), 20L, player);
 	}
 
@@ -1842,6 +1534,8 @@ public final class ContextualDialogueController {
 		if (path.endsWith("_shovel")) return "hpnsfu";
 		return "vevdkl";
 	}
+
+	// ---------------------------------------------------------------- block/item context detection
 
 	private static String selectBreakContext(BlockState state, PlayerObservation observation) {
 		if (ticks - observation.lastBreakTick <= 30L) observation.breakStreak++;
@@ -1862,7 +1556,7 @@ public final class ContextualDialogueController {
 		return "Break a Block";
 	}
 
-	private static String selectPlaceContext(Block block, ServerLevel level, BlockPos position) {
+	private static String selectPlaceContext(Block block, Level level, BlockPos position) {
 		String path = BuiltInRegistries.BLOCK.getKey(block).getPath();
 		if (level.dimension() == Level.END) return "Place a Block from the End";
 		if (level.dimension() == Level.NETHER) return "Place a Block from the Nether";
@@ -2000,7 +1694,7 @@ public final class ContextualDialogueController {
 			|| path.equals("grindstone");
 	}
 
-	private static boolean playObserved(ServerLevel level, Player player, Vec3 eventPosition, String title, long cooldown) {
+	private static boolean playObserved(Level level, Player player, Vec3 eventPosition, String title, long cooldown) {
 		Villager speaker = nearbyVillagers(level, eventPosition, OBSERVER_RANGE).stream()
 			.filter(villager -> !villager.isBaby() && !villager.isSleeping())
 			.filter(villager -> cast(villager) != CastProfile.UNREACHABLE)
@@ -2012,20 +1706,21 @@ public final class ContextualDialogueController {
 			"observed:" + speaker.getUUID() + ":" + title, cooldown, player, null, true);
 	}
 
-	private static List<Villager> nearbyVillagers(ServerLevel level, Vec3 position, double range) {
+	private static List<Villager> nearbyVillagers(Level level, Vec3 position, double range) {
 		AABB area = AABB.ofSize(position, range * 2.0, range, range * 2.0);
-		return level.getEntitiesOfClass(Villager.class, area,
-			entity -> entity.isAlive() && !entity.entityTags().contains(DIALOGUE_TEST_TAG));
+		List<Villager> found = level.getEntitiesOfClass(Villager.class, area, Entity::isAlive);
+		// getEntitiesOfClass returns entities in the level's own internal storage order, which is
+		// not guaranteed to match between two independently-running clients (it depends on chunk/
+		// entity-load timing, which can differ slightly over the network) - sorting by UUID makes
+		// every selection downstream that walks this list (e.g. picking who starts a conversation
+		// with whom) deterministic and identical across clients observing the same villagers.
+		found.sort(Comparator.comparing(Entity::getUUID));
+		return found;
 	}
 
 	private static boolean playTitle(LivingEntity speaker, String title, String cooldownKey, long cooldown) {
 		DialogueCatalog.DialogueGroup group = DialogueCatalog.byTitle(title, speakerType(speaker));
 		return group != null && play(speaker, group, cooldownKey, cooldown, null, null);
-	}
-
-	private static boolean playTitle(LivingEntity speaker, String title, String cooldownKey, long cooldown, Entity target) {
-		DialogueCatalog.DialogueGroup group = DialogueCatalog.byTitle(title, speakerType(speaker));
-		return group != null && play(speaker, group, cooldownKey, cooldown, target, null);
 	}
 
 	private static boolean playSharedTitle(LivingEntity speaker, String title, String cooldownKey, long cooldown, Entity target) {
@@ -2058,22 +1753,41 @@ public final class ContextualDialogueController {
 		return play(speaker, group, cooldownKey, cooldown, target, targetPosition, false);
 	}
 
+	/**
+	 * Derives a variant-selection seed from data every nearby client observes identically - the
+	 * speaker's identity, the dialogue group, and the server-synced world time bucketed to a
+	 * half-second window - so that independent clients reacting to the same moment converge on
+	 * the same line instead of each picking their own random variant (there is no server to
+	 * broadcast a single authoritative choice anymore).
+	 */
+	private static long variantSeed(LivingEntity speaker, DialogueCatalog.DialogueGroup group) {
+		// A wide (5s) bucket rather than a narrow one: two clients observing "the same" moment can
+		// still be a tick or two apart from ordinary network jitter, and a narrow bucket means that
+		// jitter can push them across a bucket boundary - which silently reshuffles the seed for
+		// every simultaneous trigger at once (seen live: ~30 villagers dying together landed in two
+		// different buckets one tick apart, and every single one picked a different variant).
+		long timeBucket = speaker.level().getGameTime() / 100L;
+		return Objects.hash(speaker.getUUID(), group.id(), timeBucket);
+	}
+
 	private static boolean play(LivingEntity speaker, DialogueCatalog.DialogueGroup group, String cooldownKey, long cooldown,
 			Entity target, Vec3 targetPosition, boolean sharedAdult) {
 		boolean sharedVillagerVoice = speaker instanceof Villager villager && !villager.isBaby()
 			|| speaker instanceof WanderingTrader;
 		boolean validSpeaker = matchesSpeaker(speaker, group) || sharedAdult && sharedVillagerVoice
 			&& group.speaker().equals("villager");
-		if (!(speaker.level() instanceof ServerLevel level) || !validSpeaker
-				|| !level.getServer().tickRateManager().runsNormally()
+		if (!speaker.level().isClientSide() || !validSpeaker
 				|| !VillagerNewsSettings.dialogueEnabled()
 				|| speaker instanceof Villager villager && villager.isSleeping() && !group.id().equals("asqzby")
 				|| isBusy(speaker)
 				|| !ready(cooldownKey, VillagerNewsSettings.scaleCooldown(cooldown))) return false;
 		List<Integer> recentVariants = SHARED_RECENT_VARIANTS.getOrDefault(group.id(), List.of());
-		DialogueCatalog.DialogueVariant variant = group.chooseVariant(VillagerNewsSettings.rareVoicelines(), Set.copyOf(recentVariants));
+		long seed = variantSeed(speaker, group);
+		DialogueCatalog.DialogueVariant variant = group.chooseVariant(VillagerNewsSettings.rareVoicelines(), Set.copyOf(recentVariants), seed);
 		if (variant == null) return false;
-		DialogueAnimationNetwork.send(level, speaker, group.id(), variant.index(), (int) variant.durationTicks());
+		DialogueSoundState.start(speaker.getUUID(), group.id(), variant.index(), (int) variant.durationTicks());
+		DialogueAnimationState.start(speaker.getUUID(), group.id(), variant.index(), (int) variant.durationTicks());
+		DialogueSubtitleState.start(speaker.getUUID(), group.id(), variant.index(), (int) variant.durationTicks());
 		ACTIVE_SOUNDS.put(speaker.getUUID(), new ActiveSound(group.id(), ticks + variant.durationTicks()));
 		COOLDOWNS.put(cooldownKey, ticks);
 		int maximumWeight = group.variants().stream().mapToInt(DialogueCatalog.DialogueVariant::weight).max().orElse(1);
@@ -2091,8 +1805,7 @@ public final class ContextualDialogueController {
 		markBusy(speaker, variant.durationTicks() + 10L);
 		if (speaker instanceof Mob mob) {
 			Vec3 position = target != null ? target.getEyePosition() : targetPosition;
-			boolean lockMovement = !MOBILE_DIALOGUES.contains(group.id()) && !(speaker instanceof Villager villager
-				&& cast(villager) == CastProfile.UNREACHABLE && group.id().equals("eltxge"));
+			boolean lockMovement = !MOBILE_DIALOGUES.contains(group.id());
 			SPEECH_TARGETS.put(speaker.getUUID(), new SpeechTarget(target == null ? null : target.getUUID(), position,
 				ticks + variant.durationTicks(), lockMovement));
 			if (lockMovement) holdMob(mob, position);
@@ -2108,50 +1821,6 @@ public final class ContextualDialogueController {
 			if (COSMETIC_RECIPIENT_DIALOGUES.contains(group.id())) return true;
 		}
 		return group.speaker().equals(speakerType(speaker));
-	}
-
-	public static boolean requiresBabySpeaker(String groupId) {
-		return BABY_DIALOGUES.contains(groupId);
-	}
-
-	public static long playTestDialogue(ServerLevel level, LivingEntity speaker, DialogueCatalog.DialogueGroup group,
-			int variantIndex, Entity target) {
-		interrupt(speaker);
-		DialogueCatalog.DialogueVariant variant = group.variants().stream()
-			.filter(candidate -> candidate.index() == variantIndex).findFirst().orElse(null);
-		if (variant == null) return 0L;
-		long duration = variant.durationTicks();
-		DialogueAnimationNetwork.send(level, speaker, group.id(), variant.index(), (int) duration);
-		ACTIVE_SOUNDS.put(speaker.getUUID(), new ActiveSound(group.id(), ticks + duration));
-		markBusy(speaker, duration + 10L);
-		if (speaker instanceof Mob mob) {
-			Vec3 position = target == null ? null : target.getEyePosition();
-			SPEECH_TARGETS.put(speaker.getUUID(), new SpeechTarget(target == null ? null : target.getUUID(), position,
-				ticks + duration, true));
-			holdMob(mob, position);
-		}
-		return duration;
-	}
-
-	public static void stopTestDialogue(LivingEntity speaker) {
-		interrupt(speaker);
-	}
-
-	public static void onTradeCompleted(LivingEntity trader, Player player) {
-		if (player != null) {
-			TradeSession session = ACTIVE_TRADES.get(player.getUUID());
-			if (session != null && session.traderId.equals(trader.getUUID())) session.completed = true;
-		}
-		String id = null;
-		if (trader instanceof Villager villager && cast(villager) == CastProfile.VILLAGER) {
-			id = "xmkwxd";
-		} else if (trader instanceof WanderingTrader wanderingTrader) {
-			id = "bvrbhy";
-		}
-		if (id != null && trader.level() instanceof ServerLevel level) {
-			long due = Math.max(ticks + 1L, BUSY_UNTIL.getOrDefault(trader.getUUID(), ticks) + 1L);
-			PENDING_SPEECH.add(new PendingSpeech(level, trader.getUUID(), id, player == null ? null : player.getUUID(), due));
-		}
 	}
 
 	private static boolean ready(String key, long cooldown) {
@@ -2205,29 +1874,64 @@ public final class ContextualDialogueController {
 		double z = position.z - mob.getZ();
 		double horizontal = Math.sqrt(x * x + z * z);
 		if (horizontal > 0.01) {
-			float targetYaw = (float) (Mth.atan2(z, x) * 180.0 / Math.PI) - 90.0F;
-			float headOffset = Mth.clamp(Mth.wrapDegrees(targetYaw - mob.yBodyRot), -65.0F, 65.0F);
+			float targetYaw = (float) (net.minecraft.util.Mth.atan2(z, x) * 180.0 / Math.PI) - 90.0F;
+			float headOffset = net.minecraft.util.Mth.clamp(net.minecraft.util.Mth.wrapDegrees(targetYaw - mob.yBodyRot), -65.0F, 65.0F);
 			float bodyYaw = easedRotation(mob.yBodyRot, targetYaw - headOffset, 12.0F, 0.35F);
 			float headYaw = easedRotation(mob.getYHeadRot(), targetYaw, 15.0F, 0.4F);
 			mob.setYRot(bodyYaw);
 			mob.setYBodyRot(bodyYaw);
 			mob.setYHeadRot(headYaw);
 		}
-		float targetPitch = (float) (-(Mth.atan2(y, horizontal) * 180.0 / Math.PI));
-		mob.setXRot(easedRotation(mob.getXRot(), Mth.clamp(targetPitch, -90.0F, 90.0F), 10.0F, 0.3F));
+		float targetPitch = (float) (-(net.minecraft.util.Mth.atan2(y, horizontal) * 180.0 / Math.PI));
+		mob.setXRot(easedRotation(mob.getXRot(), net.minecraft.util.Mth.clamp(targetPitch, -90.0F, 90.0F), 10.0F, 0.3F));
 	}
 
 	private static float easedRotation(float current, float target, float maximumStep, float proportion) {
-		float distance = Math.abs(Mth.wrapDegrees(target - current));
-		return Mth.approachDegrees(current, target, Mth.clamp(distance * proportion, 0.2F, maximumStep));
+		float distance = Math.abs(net.minecraft.util.Mth.wrapDegrees(target - current));
+		return net.minecraft.util.Mth.approachDegrees(current, target, net.minecraft.util.Mth.clamp(distance * proportion, 0.2F, maximumStep));
 	}
 
 	private static void interrupt(LivingEntity speaker) {
-		if (!(speaker.level() instanceof ServerLevel level)) return;
 		ACTIVE_SOUNDS.remove(speaker.getUUID());
-		DialogueAnimationNetwork.stop(level, speaker);
+		DialogueSoundState.start(speaker.getUUID(), "", 0, 0);
+		DialogueAnimationState.start(speaker.getUUID(), "", 0, 0);
+		DialogueSubtitleState.start(speaker.getUUID(), "", 0, 0);
 		BUSY_UNTIL.remove(speaker.getUUID());
 		SPEECH_TARGETS.remove(speaker.getUUID());
+	}
+
+	private static void maintainSpeechTargets(Level level) {
+		SPEECH_TARGETS.entrySet().removeIf(entry -> {
+			SpeechTarget speech = entry.getValue();
+			if (speech.untilTick <= ticks) return true;
+			Entity speaker = level.getEntity(entry.getKey());
+			if (!(speaker instanceof Mob mob) || !mob.isAlive()) return true;
+			Entity target = speech.targetId == null ? null : level.getEntity(speech.targetId);
+			Vec3 position = target != null && target.isAlive() ? target.getEyePosition() : speech.position;
+			if (speech.lockMovement) holdMob(mob, position);
+			else faceMob(mob, position);
+			return false;
+		});
+	}
+
+	private static void processPendingSpeech() {
+		Level level = Minecraft.getInstance().level;
+		if (level == null) return;
+		PENDING_SPEECH.removeIf(pending -> {
+			if (pending.dueTick > ticks) return false;
+			Entity speaker = level.getEntity(pending.speakerId);
+			Entity target = pending.targetId == null ? null : level.getEntity(pending.targetId);
+			if (speaker instanceof LivingEntity living && living.isAlive()) {
+				DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(pending.dialogueId);
+				boolean played = group != null && (pending.sharedAdult
+					? playSharedId(living, pending.dialogueId, "queued:" + living.getUUID() + ":" + pending.dialogueId, 1L, target)
+					: playId(living, pending.dialogueId, "queued:" + living.getUUID() + ":" + pending.dialogueId, 1L, target));
+				if (played && target instanceof LivingEntity listener) {
+					holdListener(listener, living, group.durationTicks());
+				}
+			}
+			return true;
+		});
 	}
 
 	private static boolean isWooly(Sheep sheep) {
@@ -2242,110 +1946,10 @@ public final class ContextualDialogueController {
 		String prefix = "{\"text\":\"";
 		if (!name.startsWith(prefix) || !name.endsWith("\"}")) return;
 		String decoded = name.substring(prefix.length(), name.length() - 2);
-		if (SPECIAL_NAMES.contains(decoded)) entity.setCustomName(Component.literal(decoded));
-	}
-
-	private static VillagerNewsData data(Villager villager) {
-		return (VillagerNewsData) villager;
-	}
-
-	private static void ensureSpecialTrade(Villager villager) {
-		CastProfile profile = cast(villager);
-		net.minecraft.world.item.Item result = switch (profile) {
-			case MAYOR -> VillagerNewsItems.MAYOR_HAT;
-			case TESTIFICATE_MAN -> VillagerNewsItems.TESTIFICATE_MAN_HELMET;
-			case NUMBER_5 -> VillagerNewsItems.MOUSTACHE;
-			case NUMBER_9 -> VillagerNewsItems.MICROPHONE;
-			default -> null;
-		};
-		if (result == null) return;
-		if (!villager.getVillagerData().profession().is(VillagerProfession.NONE)) {
-			villager.setVillagerData(villager.getVillagerData()
-				.withProfession(villager.level().registryAccess(), VillagerProfession.NONE)
-				.withLevel(1));
+		if (Set.of("Mayor Villager", "The Mayor", "Testificate Man", "Villager #5", "Villager #9",
+				"Villager Unreachable", "Can't Catch Me!", "Wooly The Sheep").contains(decoded)) {
+			entity.setCustomName(Component.literal(decoded));
 		}
-		villager.getOffers().removeIf(offer -> offer.getResult().getItem() != result);
-		if (villager.getOffers().stream().anyMatch(offer -> offer.getResult().getItem() == result)) return;
-		int price = profile == CastProfile.MAYOR ? 24 : 16;
-		villager.getOffers().add(new MerchantOffer(new ItemCost(Items.EMERALD, price), new ItemStack(result), 16, 2, 0.1F));
-	}
-
-	public static boolean isSpecialTrader(Villager villager) {
-		return switch (cast(villager)) {
-			case MAYOR, TESTIFICATE_MAN, NUMBER_5, NUMBER_9 -> true;
-			default -> false;
-		};
-	}
-
-	private static boolean tryCreateNaturalSpecial(Villager villager, ServerLevel level) {
-		if (!VillagerNewsSettings.spawnSpecialVillagers() || villager.spawnReason() != EntitySpawnReason.STRUCTURE) return false;
-		BlockPos spawn = level.getRespawnData().pos();
-		if (villager.distanceToSqr(Vec3.atCenterOf(spawn)) <= 1000.0 * 1000.0) return false;
-		Scoreboard scoreboard = level.getServer().getScoreboard();
-		Objective spawned = objective(scoreboard, SPECIAL_OBJECTIVE);
-		Objective xPosition = objective(scoreboard, SPECIAL_X_OBJECTIVE);
-		Objective zPosition = objective(scoreboard, SPECIAL_Z_OBJECTIVE);
-		List<String> available = new ArrayList<>();
-		for (String key : NATURAL_SPECIAL_NAMES.keySet()) {
-			ScoreHolder holder = ScoreHolder.forNameOnly("$vnap_" + key);
-			if (scoreboard.getOrCreatePlayerScore(holder, spawned).get() == 0) available.add(key);
-			else {
-				int x = scoreboard.getOrCreatePlayerScore(holder, xPosition).get();
-				int z = scoreboard.getOrCreatePlayerScore(holder, zPosition).get();
-				double dx = villager.getX() - x;
-				double dz = villager.getZ() - z;
-				if (dx * dx + dz * dz <= 150.0 * 150.0) return false;
-			}
-		}
-		if (available.isEmpty()) return false;
-		String key = available.get(ThreadLocalRandom.current().nextInt(available.size()));
-		if (key.equals("wooly")) {
-			Sheep sheep = EntityTypes.SHEEP.create(level, EntitySpawnReason.STRUCTURE);
-			if (sheep == null) return false;
-			sheep.copyPosition(villager);
-			sheep.setCustomName(Component.literal(NATURAL_SPECIAL_NAMES.get(key)));
-			sheep.setPersistenceRequired();
-			sheep.setColor(DyeColor.WHITE);
-			sheep.addTag(NATURAL_SPECIAL_TAG);
-			if (!level.addFreshEntity(sheep)) return false;
-			villager.discard();
-		} else {
-			villager.setCustomName(Component.literal(NATURAL_SPECIAL_NAMES.get(key)));
-			villager.setPersistenceRequired();
-			villager.addTag(NATURAL_SPECIAL_TAG);
-		}
-		ScoreHolder holder = ScoreHolder.forNameOnly("$vnap_" + key);
-		scoreboard.getOrCreatePlayerScore(holder, spawned).set(1);
-		scoreboard.getOrCreatePlayerScore(holder, xPosition).set(villager.blockPosition().getX());
-		scoreboard.getOrCreatePlayerScore(holder, zPosition).set(villager.blockPosition().getZ());
-		return key.equals("wooly");
-	}
-
-	private static void clearNaturalSpecial(ServerLevel level, Entity entity) {
-		String key = naturalSpecialKey(entity);
-		if (key == null) return;
-		Scoreboard scoreboard = level.getServer().getScoreboard();
-		ScoreHolder holder = ScoreHolder.forNameOnly("$vnap_" + key);
-		scoreboard.getOrCreatePlayerScore(holder, objective(scoreboard, SPECIAL_OBJECTIVE)).set(0);
-	}
-
-	private static String naturalSpecialKey(Entity entity) {
-		if (entity instanceof Sheep sheep && isWooly(sheep)) return "wooly";
-		if (!(entity instanceof Villager villager)) return null;
-		return switch (cast(villager)) {
-			case MAYOR -> "mayor";
-			case TESTIFICATE_MAN -> "testificate";
-			case NUMBER_5 -> "number_5";
-			case NUMBER_9 -> "number_9";
-			case UNREACHABLE -> "unreachable";
-			default -> null;
-		};
-	}
-
-	private static Objective objective(Scoreboard scoreboard, String name) {
-		Objective existing = scoreboard.getObjective(name);
-		return existing == null ? scoreboard.addObjective(name, ObjectiveCriteria.DUMMY, Component.literal(name),
-			ObjectiveCriteria.RenderType.INTEGER, false, null) : existing;
 	}
 
 	private static String orderedPair(UUID first, UUID second) {
@@ -2362,7 +1966,7 @@ public final class ContextualDialogueController {
 		};
 	}
 
-	private static CastProfile cast(Villager villager) {
+	public static CastProfile cast(Villager villager) {
 		String name = villager.getName().getString().toLowerCase(Locale.ROOT);
 		if (name.equals("mayor") || name.equals("the mayor") || name.equals("mayor villager")) return CastProfile.MAYOR;
 		if (name.equals("testificate man")) return CastProfile.TESTIFICATE_MAN;
@@ -2388,7 +1992,7 @@ public final class ContextualDialogueController {
 		return "";
 	}
 
-	private enum CastProfile {
+	public enum CastProfile {
 		VILLAGER("xfpjxq", "lvigit", "clbjww", "wyvzhk", "vevdkl"),
 		MAYOR("dpwhhs", "xxehbq", "njyapy", "ssbhiv", "ltdnvy"),
 		TESTIFICATE_MAN("nmwmrz", "luoibc", "mpbnsm", "fzoqwd", "fzoqwd"),
@@ -2430,75 +2034,22 @@ public final class ContextualDialogueController {
 	private record SpeechTarget(UUID targetId, Vec3 position, long untilTick, boolean lockMovement) {
 	}
 
-	private record PendingSpeech(ServerLevel level, UUID speakerId, String dialogueId, UUID targetId, long dueTick,
-			boolean sharedAdult) {
-		private PendingSpeech(ServerLevel level, UUID speakerId, String dialogueId, UUID targetId, long dueTick) {
-			this(level, speakerId, dialogueId, targetId, dueTick, false);
-		}
-	}
-
-	private static final class PendingSleep {
-		private final ServerLevel level;
-		private final BlockPos bedPos;
-		private long dueTick;
-		private boolean bedtimeStarted;
-
-		private PendingSleep(ServerLevel level, BlockPos bedPos, long dueTick, boolean bedtimeStarted) {
-			this.level = level;
-			this.bedPos = bedPos;
-			this.dueTick = dueTick;
-			this.bedtimeStarted = bedtimeStarted;
-		}
+	private record PendingSpeech(UUID speakerId, String dialogueId, UUID targetId, long dueTick, boolean sharedAdult) {
 	}
 
 	private record ActiveSound(String groupId, long endTick) {
 	}
 
 	private static final class TradeSession {
-		private final ServerLevel level;
 		private final UUID traderId;
 		private final long createdTick;
 		private boolean opened;
 		private boolean completed;
+		private int lastUsesTotal;
 
-		private TradeSession(ServerLevel level, UUID traderId, long createdTick) {
-			this.level = level;
+		private TradeSession(UUID traderId, long createdTick) {
 			this.traderId = traderId;
 			this.createdTick = createdTick;
-		}
-	}
-
-	private static final class UnreachableState {
-		private long stateEnteredTick;
-		private long nextPathTick;
-		private boolean coolingDown;
-
-		private UnreachableState(long tick) {
-			this.stateEnteredTick = tick;
-			this.nextPathTick = tick;
-		}
-
-		private void updateFleeing(long tick) {
-			if (coolingDown && tick - stateEnteredTick > 240L) {
-				coolingDown = false;
-				stateEnteredTick = tick;
-			}
-		}
-
-		private void stopFleeing(long tick) {
-			if (coolingDown) {
-				coolingDown = false;
-				stateEnteredTick = tick;
-			}
-		}
-
-		private boolean canTaunt(long tick) {
-			return !coolingDown && tick - stateEnteredTick > 120L;
-		}
-
-		private void taunted(long tick) {
-			coolingDown = true;
-			stateEnteredTick = tick;
 		}
 	}
 }

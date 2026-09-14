@@ -214,11 +214,7 @@ public final class HandbookScreen extends Screen {
 
 	private void buildSettings(int left, int contentWidth) {
 		boolean canEdit = VillagerNewsSettingsState.canEdit();
-		addText(left, 42, contentWidth, Component.literal(canEdit
-			? VillagerNewsSettingsState.localSettings()
-				? "Dialogue settings are saved for local worlds."
-				: "Dialogue settings are saved by the current server."
-			: "Server dialogue settings require operator permission."), true);
+		addText(left, 42, contentWidth, Component.literal("Dialogue settings are saved locally on this client."), true);
 		int labelWidth = Math.min(166, contentWidth / 2);
 		int buttonLeft = left + labelWidth;
 		int buttonWidth = contentWidth - labelWidth;

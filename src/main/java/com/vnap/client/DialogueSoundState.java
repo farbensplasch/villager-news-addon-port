@@ -1,7 +1,6 @@
 package com.vnap.client;
 
 import com.vnap.dialogue.DialogueCatalog;
-import com.vnap.network.DialogueAnimationPayload;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.EntityBoundSoundInstance;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
@@ -23,31 +22,32 @@ public final class DialogueSoundState {
 	private DialogueSoundState() {
 	}
 
-	public static void start(DialogueAnimationPayload payload) {
+	public static void start(UUID entityId, String groupId, int variantIndex, int durationTicks) {
 		Minecraft minecraft = Minecraft.getInstance();
-		stop(minecraft, payload.entityId());
-		PENDING.remove(payload.entityId());
-		if (payload.groupId().isEmpty() || minecraft.level == null) return;
-		if (!tryStart(minecraft, payload)) {
-			PENDING.put(payload.entityId(), new PendingSound(payload, System.nanoTime() + PENDING_TIMEOUT_NANOS));
+		stop(minecraft, entityId);
+		PENDING.remove(entityId);
+		if (groupId.isEmpty() || minecraft.level == null) return;
+		PendingSound request = new PendingSound(entityId, groupId, variantIndex, durationTicks, System.nanoTime() + PENDING_TIMEOUT_NANOS);
+		if (!tryStart(minecraft, request)) {
+			PENDING.put(entityId, request);
 		}
 	}
 
-	private static boolean tryStart(Minecraft minecraft, DialogueAnimationPayload payload) {
-		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(payload.groupId());
+	private static boolean tryStart(Minecraft minecraft, PendingSound request) {
+		DialogueCatalog.DialogueGroup group = DialogueCatalog.byId(request.groupId());
 		if (group == null) return true;
 		DialogueCatalog.DialogueVariant variant = group.variants().stream()
-			.filter(candidate -> candidate.index() == payload.variantIndex()).findFirst().orElse(null);
-		Entity entity = minecraft.level.getEntity(payload.entityId());
+			.filter(candidate -> candidate.index() == request.variantIndex()).findFirst().orElse(null);
+		Entity entity = minecraft.level.getEntity(request.entityId());
 		if (variant == null) return true;
 		if (entity == null) return false;
 		boolean followsEntity = entity.isAlive() && !entity.isSilent()
-			&& !payload.groupId().equals("hivgme") && !payload.groupId().equals("ecslqo");
+			&& !request.groupId().equals("hivgme") && !request.groupId().equals("ecslqo");
 		SoundInstance sound = followsEntity
 			? new EntityBoundSoundInstance(variant.sound(), SoundSource.NEUTRAL, 1.0F, 1.0F, entity, entity.getRandom().nextLong())
 			: new SimpleSoundInstance(variant.sound(), SoundSource.NEUTRAL, 1.0F, 1.0F, RandomSource.create(), entity.getX(), entity.getY(), entity.getZ());
 		minecraft.getSoundManager().play(sound);
-		ACTIVE.put(payload.entityId(), new ActiveSound(sound, followsEntity, System.nanoTime() + payload.durationTicks() * 50_000_000L));
+		ACTIVE.put(request.entityId(), new ActiveSound(sound, followsEntity, System.nanoTime() + request.durationTicks() * 50_000_000L));
 		return true;
 	}
 
@@ -60,7 +60,7 @@ public final class DialogueSoundState {
 		Iterator<Map.Entry<UUID, PendingSound>> pendingIterator = PENDING.entrySet().iterator();
 		while (pendingIterator.hasNext()) {
 			PendingSound pending = pendingIterator.next().getValue();
-			if (now >= pending.expiresAtNanos() || tryStart(minecraft, pending.payload())) pendingIterator.remove();
+			if (now >= pending.expiresAtNanos() || tryStart(minecraft, pending)) pendingIterator.remove();
 		}
 		Iterator<Map.Entry<UUID, ActiveSound>> iterator = ACTIVE.entrySet().iterator();
 		while (iterator.hasNext()) {
@@ -86,6 +86,6 @@ public final class DialogueSoundState {
 	private record ActiveSound(SoundInstance instance, boolean followsEntity, long endNanos) {
 	}
 
-	private record PendingSound(DialogueAnimationPayload payload, long expiresAtNanos) {
+	private record PendingSound(UUID entityId, String groupId, int variantIndex, int durationTicks, long expiresAtNanos) {
 	}
 }

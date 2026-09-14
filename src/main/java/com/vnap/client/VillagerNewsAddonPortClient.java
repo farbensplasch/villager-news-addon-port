@@ -2,26 +2,35 @@ package com.vnap.client;
 
 import com.vnap.VillagerNewsAddonPort;
 import com.vnap.item.VillagerNewsItems;
-import com.vnap.network.DialogueAnimationPayload;
-import com.vnap.network.VillagerNewsSettingsPayload;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.LivingEntityRenderLayerRegistrationCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.VillagerRenderer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.HitResult;
+import org.lwjgl.glfw.GLFW;
 import traben.entity_model_features.EMFAnimationApi;
 
 import java.io.IOException;
 import java.util.function.Supplier;
 
 public final class VillagerNewsAddonPortClient implements ClientModInitializer {
+	private static final KeyMapping.Category CATEGORY = KeyMapping.Category.register(VillagerNewsAddonPort.id("villager_news"));
+	private static KeyMapping toggleNoseKey;
+	private static KeyMapping cycleSignKey;
+	private static KeyMapping openHandbookKey;
+
 	@Override
 	public void onInitializeClient() {
+		VillagerCosmetics.load();
 		try {
 			DialogueAnimationState.load();
 			registerFloat("vnap_speaking", DialogueAnimationState::speaking, "Whether the Villager News character is speaking");
@@ -48,35 +57,54 @@ public final class VillagerNewsAddonPortClient implements ClientModInitializer {
 			}
 		});
 
-		ClientPlayNetworking.registerGlobalReceiver(DialogueAnimationPayload.TYPE, (payload, context) ->
-			context.client().execute(() -> {
-				DialogueSoundState.start(payload);
-				DialogueAnimationState.start(payload);
-				DialogueSubtitleState.start(payload);
-			})
-		);
-		ClientPlayNetworking.registerGlobalReceiver(VillagerNewsSettingsPayload.TYPE, (payload, context) ->
-			context.client().execute(() -> VillagerNewsSettingsState.apply(payload))
-		);
-		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
-			DialogueSoundState.clear(client);
-			DialogueAnimationState.clear();
-			DialogueSubtitleState.clear();
-			VillagerNewsSettingsState.reset();
-		});
 		UseItemCallback.EVENT.register((player, level, hand) -> {
 			if (!level.isClientSide()) return InteractionResult.PASS;
 			if (player.getItemInHand(hand).getItem() != VillagerNewsItems.HANDBOOK) return InteractionResult.PASS;
 			Minecraft.getInstance().setScreenAndShow(new HandbookScreen());
 			return InteractionResult.SUCCESS;
 		});
+
+		toggleNoseKey = KeyMappingHelper.registerKeyMapping(
+			new KeyMapping("key.villager-news-addon-port.toggle_nose", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_N, CATEGORY));
+		cycleSignKey = KeyMappingHelper.registerKeyMapping(
+			new KeyMapping("key.villager-news-addon-port.cycle_sign", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_B, CATEGORY));
+		openHandbookKey = KeyMappingHelper.registerKeyMapping(
+			new KeyMapping("key.villager-news-addon-port.open_handbook", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_H, CATEGORY));
+
 		DialogueSubtitleState.register();
+		ClientDialogueController.register();
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			DialogueSoundState.tick(client);
 			DialogueAnimationState.tick(client);
 			DialogueSubtitleState.tick(client);
+			handleKeybinds(client);
 		});
 		VillagerNewsAddonPort.LOGGER.info("Registered synchronized EMF facial and dialogue animations");
+	}
+
+	private static void handleKeybinds(Minecraft client) {
+		Villager target = targetedVillager(client);
+		while (toggleNoseKey.consumeClick()) {
+			if (target != null) VillagerCosmetics.toggleNose(target.getUUID());
+		}
+		while (cycleSignKey.consumeClick()) {
+			if (target == null) continue;
+			boolean shift = GLFW.glfwGetKey(client.getWindow().handle(), GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS
+				|| GLFW.glfwGetKey(client.getWindow().handle(), GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
+			if (shift) VillagerCosmetics.cycleSignType(target.getUUID(), false);
+			else VillagerCosmetics.cycleSignMessage(target.getUUID(), false);
+		}
+		while (openHandbookKey.consumeClick()) {
+			client.setScreenAndShow(new HandbookScreen());
+		}
+	}
+
+	private static Villager targetedVillager(Minecraft client) {
+		HitResult hit = client.hitResult;
+		if (hit instanceof EntityHitResult entityHitResult && entityHitResult.getEntity() instanceof Villager villager) {
+			return villager;
+		}
+		return null;
 	}
 
 	private static void registerFloat(String name, Supplier<Float> supplier, String description) throws Exception {

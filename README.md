@@ -5,6 +5,14 @@ It brings the original Villager News characters, models, animations, textures,
 voice acting, and contextual dialogue to Java Edition while retaining normal
 Minecraft villager gameplay.
 
+This fork converts the mod to run **entirely client-side**. The original port
+required installing the mod on both the client and the server. This version
+only needs to be installed on your client — it works in singleplayer, over
+LAN, and on any multiplayer server, including vanilla servers that don't have
+the mod (or any mod) installed at all. See
+[Differences from the server-sided version](#differences-from-the-server-sided-version)
+for what that trade-off costs.
+
 ## Community
 
 Join the [Villager News Addon Port Discord server](https://discord.gg/vEpbtj2ChP)
@@ -19,20 +27,15 @@ for support, updates, and discussion.
 - Wooly the Sheep and the Villager News wandering trader
 - 2,212 original voice clips across 523 dialogue groups
 - Context-aware dialogue for player actions, nearby mobs, weather, dimensions,
-  combat, trading, work, sleep, spawning, growth, and other world events
+  combat, trading, work, sleep, growth, and other world events
 - Multi-part conversations between nearby villagers
 - Facial expressions and gestures synchronized with each voice line
-- Server-controlled dialogue selection, sound playback, cooldowns, and
-  villager behavior
+- Fully client-side dialogue selection, sound playback, cooldowns, and
+  villager behavior — no server-side install required
 - Speakers look toward the player, entity, block, or villager they are talking
   about
-- Removable villager noses, character cosmetics, cosmetic reactions, and
-  missing-nose conversations
-- Character trades for the Mayor Hat, Testificate Man Helmet, Moustache, and
-  Microphone
-- Persistent natural spawning for one of each special character in distant
-  villages
-- A craftable Villager News Handbook
+- Automatic, deterministic villager noses, cosmetics, and sign boards, with
+  keybinds to toggle or cycle them per villager
 - Optional Mod Menu configuration screen
 
 ## Requirements
@@ -55,13 +58,14 @@ in the Villager News Handbook.
 
 1. Install Fabric Loader for Minecraft 26.2.
 2. Download Fabric API, EMF, ETF, and ESF for the same Minecraft version.
-3. Put the dependency jars and the Villager News Addon Port jar in the
-   Minecraft `mods` folder.
+3. Put the dependency jars and the Villager News Addon Port jar in your
+   **client's** Minecraft `mods` folder.
 4. Start Minecraft with the Fabric profile.
 
-The dialogue controller runs on the server. For multiplayer, install the mod
-and its dependencies on both the server and every connecting client so models,
-animations, textures, and sounds are available to everyone.
+That's it — nothing needs to be installed on the server. Everyone who wants to
+see and hear Villager News content needs their own client install of the mod;
+players without it simply see ordinary vanilla villagers, and the mod doesn't
+require anyone's permission or cooperation from the server to work.
 
 ## Characters
 
@@ -79,36 +83,69 @@ Name a sheep `Wooly` or `Wooly The Sheep` to use Wooly's model, animations,
 and sounds. Ordinary villagers and wandering traders receive their Villager
 News appearance and dialogue automatically.
 
-Special characters can also appear naturally as new distant villages are
-generated. Each character appears once at a time and becomes eligible to spawn
-again after being killed.
+## Cosmetics, noses, and sign boards
 
-## Items
+Cosmetics (the Mayor's hat, Testificate Man's helmet, Villager #5's
+moustache, Villager #9's microphone) now render automatically on the matching
+named character — there's nothing to buy or equip.
 
-All custom items are available in the **Villager News** creative-mode tab.
+Every villager has a nose by default, and roughly one in seven carries a sign
+board with a message, both assigned automatically and consistently per
+villager. Two keybinds (configurable in Controls, under "Villager News Addon
+Port") let you override a specific villager while looking at it:
 
-Craft the Villager News Handbook from three pieces of paper. It includes the
-add-on's overview, special-character and cosmetic guides, settings reference,
-social and support pages, and the complete searchable Triggers & Reactions
-guide.
-
-Shear an adult villager to remove its nose. Interact with that villager while
-holding the nose to return it. The Mayor, Testificate Man, Villager #5, and
-Villager #9 sell their matching cosmetics. Cosmetics can be given to ordinary
-villagers and removed again with shears.
+| Default key | Action |
+| --- | --- |
+| `N` | Toggle that villager's nose on/off |
+| `B` | Cycle that villager's sign message (hold Shift to cycle/remove the sign's wood type) |
+| `H` | Open the Villager News Handbook |
 
 ## Dialogue
 
 Villagers react to what happens around them. They can comment when a player
 approaches, stares, changes game mode, wears armor, receives an effect, breaks
-or places a block, uses an item, completes a trade, or spawns a villager with a
-spawn egg. They also react to their profession, workstation, level, biome,
-weather, time of day, nearby entities, damage source, and other villagers.
+or places a block, uses an item, completes a trade, or spawns a villager. They
+also react to their profession, workstation, level, biome, weather, time of
+day, nearby entities, damage, and other villagers.
 
-The server chooses the exact voice variant and broadcasts its matching
-animation. Each speaker remains occupied for the real length of the clip,
+Each client selects the exact voice variant and plays its matching animation
+locally. Each speaker remains occupied for the real length of the clip,
 preventing unrelated lines from overlapping. Conversation partners take turns
 and continue looking at each other throughout multi-part exchanges.
+
+## Differences from the server-sided version
+
+Making the mod fully client-side means a few things that relied on
+server-side authority had to be redesigned or dropped:
+
+- **No spawn eggs and no natural special-villager spawning.** Custom items
+  can't be reliably obtained on a server that doesn't have this mod, so the
+  6 special-villager spawn eggs and the automatic natural spawning of
+  characters in distant villages have been removed. Name a villager with a
+  name tag instead — that still works everywhere, since names are ordinary
+  synced vanilla data.
+- **Cosmetics are automatic instead of purchasable.** Buying a hat from the
+  Mayor relied on the server injecting a custom trade offer. Cosmetics are now
+  assigned automatically and deterministically instead (see above).
+- **Reputation- and raid-gated dialogue lines are approximated**, using a
+  local per-client proxy (trades/gifts given to that villager, nearby raiders)
+  instead of the real server-side gossip and raid state, which vanilla
+  doesn't expose to clients.
+- **The `/dialoguetest` developer command has been removed.**
+- **In multiplayer, only players with the mod installed see or hear anything**
+  — there's no server broadcasting a single shared decision anymore, so each
+  client independently decides when and what a villager says. Multiple
+  modded clients on the same server generally converge on the same lines at
+  the same time for shared, world-driven triggers (weather, time of day,
+  trading, villager conversations), since variant selection and timing are
+  derived from the synced world clock rather than each client's own random
+  state — but it isn't guaranteed to be frame-perfect, and reactions tied to
+  one specific player's own actions (breaking a block, using an item,
+  attacking) are only ever visible to that player's own client, since there's
+  no server relaying them to bystanders.
+
+Everything else — the models, animations, textures, 2,212 voice clips, and
+the full contextual dialogue system — is unchanged.
 
 ## Building from source
 
@@ -125,15 +162,6 @@ On Linux or macOS:
 ```
 
 The distributable jar is written to `build/libs`.
-
-To include the operator-only dialogue test command in a development build, set
-`dialogue_test_command=true` in `gradle.properties` before building. Use
-`/dialoguetest <1-523>` in game to spawn the matching speaker and subject, play
-every variant from that dialogue group, and remove the test actors when each one ends.
-Use `/dialoguetest continuous` to run all 523 groups in order. Each group is
-announced with its variant number in chat, and the next variant begins one second
-after the current voice line finishes.
-The setting defaults to `false` for release builds.
 
 Run the asset and dialogue verification with:
 

@@ -124,6 +124,18 @@ public final class DialogueCatalog {
 		}
 
 		public DialogueVariant chooseVariant(int rareVoicelines, Set<Integer> excludedVariants) {
+			return chooseVariant(rareVoicelines, excludedVariants, null);
+		}
+
+		/**
+		 * {@code seed}, when given, replaces the per-client {@link ThreadLocalRandom} with a
+		 * deterministic {@link java.util.Random} - since every client independently decides which
+		 * dialogue variant to play (there is no server to broadcast the choice), passing the same
+		 * seed from multiple clients observing the same event (e.g. derived from the speaker's UUID,
+		 * the dialogue group id, and the synced world time) lets them converge on the same line
+		 * instead of each rolling their own random pick.
+		 */
+		public DialogueVariant chooseVariant(int rareVoicelines, Set<Integer> excludedVariants, Long seed) {
 			if (variants.isEmpty()) return null;
 			int minimum = variants.stream().mapToInt(DialogueVariant::weight).min().orElse(1);
 			int maximum = variants.stream().mapToInt(DialogueVariant::weight).max().orElse(1);
@@ -138,10 +150,10 @@ public final class DialogueCatalog {
 				totalWeight += weights[index];
 			}
 			if (totalWeight <= 0) {
-				if (!excludedVariants.isEmpty()) return chooseVariant(rareVoicelines, Set.of());
+				if (!excludedVariants.isEmpty()) return chooseVariant(rareVoicelines, Set.of(), seed);
 				return variants.getFirst();
 			}
-			int choice = ThreadLocalRandom.current().nextInt(Math.max(1, totalWeight));
+			int choice = (seed != null ? new java.util.Random(seed) : ThreadLocalRandom.current()).nextInt(Math.max(1, totalWeight));
 			for (int index = 0; index < variants.size(); index++) {
 				choice -= weights[index];
 				if (choice < 0) return variants.get(index);

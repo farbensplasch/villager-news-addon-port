@@ -1,87 +1,50 @@
 package com.vnap.client;
 
 import com.vnap.config.VillagerNewsSettings;
-import com.vnap.network.VillagerNewsSettingsPayload;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
-import net.minecraft.client.Minecraft;
 
+/**
+ * Thin client-side cache in front of {@link VillagerNewsSettings}. Now that this is a
+ * client-only mod, there is no server to authorize edits or push updates from - every install
+ * always behaves the way the old "localSettings" path did, editing the on-disk JSON config
+ * directly.
+ */
 public final class VillagerNewsSettingsState {
-	private static int chattiness = 2;
-	private static int rareVoicelines = 1;
-	private static boolean spawnSpecialVillagers = true;
-	private static boolean canEdit;
-	private static boolean localSettings;
-
 	private VillagerNewsSettingsState() {
 	}
 
-	public static void apply(VillagerNewsSettingsPayload payload) {
-		chattiness = Math.max(0, Math.min(3, payload.chattiness()));
-		rareVoicelines = Math.max(0, Math.min(2, payload.rareVoicelines()));
-		spawnSpecialVillagers = payload.spawnSpecialVillagers();
-		canEdit = payload.canEdit();
-		localSettings = false;
-	}
-
 	public static void prepareConfigScreen() {
-		if (Minecraft.getInstance().getConnection() != null) return;
-		chattiness = VillagerNewsSettings.chattiness();
-		rareVoicelines = VillagerNewsSettings.rareVoicelines();
-		spawnSpecialVillagers = VillagerNewsSettings.spawnSpecialVillagers();
-		canEdit = true;
-		localSettings = true;
+		// Nothing to prepare anymore; getters/setters read/write VillagerNewsSettings directly.
 	}
 
 	public static int chattiness() {
-		return chattiness;
+		return VillagerNewsSettings.chattiness();
 	}
 
 	public static int rareVoicelines() {
-		return rareVoicelines;
+		return VillagerNewsSettings.rareVoicelines();
 	}
 
 	public static boolean spawnSpecialVillagers() {
-		return spawnSpecialVillagers;
+		return VillagerNewsSettings.spawnSpecialVillagers();
 	}
 
 	public static boolean canEdit() {
-		return canEdit;
-	}
-
-	public static boolean localSettings() {
-		return localSettings;
+		return true;
 	}
 
 	public static void setChattiness(int value) {
-		if (!canEdit) return;
-		chattiness = Math.floorMod(value, 4);
-		send();
+		VillagerNewsSettings.update(Math.floorMod(value, 4), rareVoicelines(), spawnSpecialVillagers());
 	}
 
 	public static void setRareVoicelines(int value) {
-		if (!canEdit) return;
-		rareVoicelines = Math.floorMod(value, 3);
-		send();
+		VillagerNewsSettings.update(chattiness(), Math.floorMod(value, 3), spawnSpecialVillagers());
 	}
 
 	public static void setSpawnSpecialVillagers(boolean value) {
-		if (!canEdit) return;
-		spawnSpecialVillagers = value;
-		send();
-	}
-
-	private static void send() {
-		if (localSettings) {
-			VillagerNewsSettings.update(chattiness, rareVoicelines, spawnSpecialVillagers);
-			return;
-		}
-		if (Minecraft.getInstance().getConnection() != null && ClientPlayNetworking.canSend(VillagerNewsSettingsPayload.TYPE)) {
-			ClientPlayNetworking.send(new VillagerNewsSettingsPayload(chattiness, rareVoicelines, spawnSpecialVillagers, false));
-		}
+		VillagerNewsSettings.update(chattiness(), rareVoicelines(), value);
 	}
 
 	public static void reset() {
-		canEdit = false;
-		localSettings = false;
+		// No-op: settings are always local now.
 	}
 }

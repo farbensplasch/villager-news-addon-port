@@ -2,7 +2,7 @@ package com.vnap.mixin.client;
 
 import com.vnap.client.VillagerNewsRenderState;
 import com.vnap.client.DialogueAnimationState;
-import com.vnap.entity.VillagerNewsData;
+import com.vnap.client.VillagerCosmetics;
 import net.minecraft.client.renderer.entity.VillagerRenderer;
 import net.minecraft.client.renderer.entity.state.VillagerRenderState;
 import net.minecraft.world.entity.npc.villager.Villager;
@@ -25,10 +25,9 @@ public abstract class VillagerRendererMixin {
 			ignored -> new StableVillagerData(state.villagerData));
 		state.villagerData = stableData.resolve(state.villagerData, villager.tickCount);
 		DialogueAnimationState.trackBodyRotation(villager, state.bodyRot, villager.tickCount + partialTick);
-		VillagerNewsData data = (VillagerNewsData) villager;
 		VillagerNewsRenderState renderState = (VillagerNewsRenderState) state;
-		renderState.vnap$setSignMessage(data.vnap$signMessage());
-		renderState.vnap$setSignType(data.vnap$signType());
+		renderState.vnap$setSignMessage(VillagerCosmetics.signMessage(villager.getUUID()));
+		renderState.vnap$setSignType(VillagerCosmetics.signType(villager.getUUID()));
 	}
 
 	private static final class StableVillagerData {

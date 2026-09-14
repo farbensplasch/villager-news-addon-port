@@ -5,8 +5,6 @@
   "mixins": [
     "AbstractVillagerMixin",
     "SheepSoundMixin",
-    "VillagerDataMixin",
-    "VillagerSleepMixin",
     "VillagerSoundMixin"
   ],
   "injectors": {

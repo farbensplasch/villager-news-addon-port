@@ -7,6 +7,7 @@ bin/
 
 # Minecraft development runtime
 run/
+run2/
 logs/
 saves/
 downloads/

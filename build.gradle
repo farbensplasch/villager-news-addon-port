@@ -41,16 +41,10 @@ dependencies {
 
 processResources {
 	def version = project.version
-	def dialogueTestCommand = project.findProperty("dialogue_test_command")?.toString()?.toBoolean() ?: false
 	inputs.property "version", version
-	inputs.property "dialogue_test_command", dialogueTestCommand
 
 	filesMatching("fabric.mod.json") {
 		expand "version": version
-	}
-
-	filesMatching("villager-news-addon-port-build.properties") {
-		expand "dialogue_test_command": dialogueTestCommand
 	}
 }
 
