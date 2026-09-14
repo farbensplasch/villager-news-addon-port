@@ -1,6 +1,7 @@
 package com.vnap.client;
 
 import com.vnap.VillagerNewsAddonPort;
+import com.vnap.config.VillagerNewsSettings;
 import com.vnap.dialogue.DialogueCatalog;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
@@ -74,7 +75,7 @@ public final class DialogueSubtitleState {
 
 	private static void render(GuiGraphicsExtractor graphics, DeltaTracker deltaTracker) {
 		Minecraft minecraft = Minecraft.getInstance();
-		if (minecraft.level == null || minecraft.player == null || !minecraft.options.showSubtitles().get()) return;
+		if (minecraft.level == null || minecraft.player == null || !VillagerNewsSettings.showSubtitles()) return;
 		long now = System.nanoTime();
 		List<VisibleSubtitle> visible = new ArrayList<>();
 		for (Map.Entry<UUID, ActiveSubtitle> entry : ACTIVE.entrySet()) {

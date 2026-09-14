@@ -28,6 +28,14 @@ public final class VillagerNewsSettingsState {
 		return VillagerNewsSettings.spawnSpecialVillagers();
 	}
 
+	public static boolean showSubtitles() {
+		return VillagerNewsSettings.showSubtitles();
+	}
+
+	public static void setShowSubtitles(boolean value) {
+		VillagerNewsSettings.setShowSubtitles(value);
+	}
+
 	public static boolean canEdit() {
 		return true;
 	}

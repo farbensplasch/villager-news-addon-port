@@ -34,6 +34,13 @@ for support, updates, and discussion.
   villager behavior — no server-side install required
 - Speakers look toward the player, entity, block, or villager they are talking
   about
+- Ringing a bell rouses every awake villager in earshot, each reacting in
+  their own voice a moment later
+- Villagers keep reacting for as long as they are poisoned, burning, freezing,
+  or stuck in a block, and say something relieved once it stops
+- 3D handbook and microphone models while held in first and third person
+- Villager News subtitles have their own on/off toggle in the Handbook,
+  separate from Minecraft's own sound subtitles
 - Automatic, deterministic villager noses, cosmetics, and sign boards, with
   keybinds to toggle or cycle them per villager
 - Optional Mod Menu configuration screen
